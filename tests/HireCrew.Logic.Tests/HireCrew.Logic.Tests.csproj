@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <LangVersion>7.3</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\CrewModels.cs" Link="CrewModels.cs" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\CrewConfig.cs" Link="CrewConfig.cs" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\CrewValidation.cs" Link="CrewValidation.cs" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\CrewStore.cs" Link="CrewStore.cs" />
+  </ItemGroup>
+</Project>
