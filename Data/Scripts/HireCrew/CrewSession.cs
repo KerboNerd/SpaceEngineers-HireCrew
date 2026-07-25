@@ -33,21 +33,61 @@ namespace HireCrew
 
         public override void SaveData()
         {
-            if (!MyAPIGateway.Multiplayer.IsServer) return;
-            var bytes = Store.ToBytes();
-            MyAPIGateway.Utilities.SetVariable("HireCrew_Store", Convert.ToBase64String(bytes ?? new byte[0]));
+            if (!MyAPIGateway.Multiplayer.IsServer || Store == null) return;
+            var bytes = Store.ToBytes() ?? new byte[0];
+            var b64 = Convert.ToBase64String(bytes);
+            // Dual-write: world variable + WorldStorage file (dedicated save/load resilience).
+            MyAPIGateway.Utilities.SetVariable("HireCrew_Store", b64);
+            try
+            {
+                using (var writer = MyAPIGateway.Utilities.WriteFileInWorldStorage("HireCrew.dat", typeof(CrewSession)))
+                    writer.Write(b64);
+            }
+            catch
+            {
+                // Variable path remains as fallback.
+            }
         }
 
         public override void BeforeStart()
         {
             if (!MyAPIGateway.Multiplayer.IsServer) return;
-            string b64;
-            if (MyAPIGateway.Utilities.GetVariable("HireCrew_Store", out b64) && !string.IsNullOrEmpty(b64))
+            byte[] payload = TryLoadStoreBytes();
+            if (payload != null)
             {
-                try { Store = CrewStore.FromBytes(Convert.FromBase64String(b64)); }
+                try { Store = CrewStore.FromBytes(payload); }
                 catch { Store = new CrewStore(); }
             }
             ReseatAllFromStore();
+        }
+
+        private static byte[] TryLoadStoreBytes()
+        {
+            // Prefer WorldStorage file; fall back to session variable.
+            try
+            {
+                if (MyAPIGateway.Utilities.FileExistsInWorldStorage("HireCrew.dat", typeof(CrewSession)))
+                {
+                    using (var reader = MyAPIGateway.Utilities.ReadFileInWorldStorage("HireCrew.dat", typeof(CrewSession)))
+                    {
+                        var b64 = reader.ReadToEnd();
+                        if (!string.IsNullOrEmpty(b64))
+                            return Convert.FromBase64String(b64);
+                    }
+                }
+            }
+            catch
+            {
+                // Fall through to variable.
+            }
+
+            string varB64;
+            if (MyAPIGateway.Utilities.GetVariable("HireCrew_Store", out varB64) && !string.IsNullOrEmpty(varB64))
+            {
+                try { return Convert.FromBase64String(varB64); }
+                catch { return null; }
+            }
+            return null;
         }
 
         protected override void UnloadData()
@@ -86,8 +126,12 @@ namespace HireCrew
             if (id == CrewNetworking.RosterMsg)
             {
                 if (MyAPIGateway.Multiplayer.IsServer) return;
-                CrewNetworking.Deserialize<RosterSync>(data);
-                // Client cache optional in v1; UI can request refresh via terminal read from block custom data later
+                var sync = CrewNetworking.Deserialize<RosterSync>(data);
+                if (sync != null && sync.StoreBytes != null)
+                {
+                    try { Store = CrewStore.FromBytes(sync.StoreBytes); }
+                    catch { /* keep existing client store */ }
+                }
                 return;
             }
 
@@ -274,6 +318,8 @@ namespace HireCrew
         private void WatchCrewIntegrity()
         {
             var snapshot = new List<CrewRecord>(Store.All);
+            var dirty = false;
+            long broadcastGrid = 0;
             foreach (var crew in snapshot)
             {
                 if (crew.Status != CrewStatus.Seated) continue;
@@ -286,7 +332,11 @@ namespace HireCrew
 
                 if (!seatOk || !wepOk || !gridOk || !alive)
                 {
-                    InvalidateCrew(crew.CrewId, "integrity");
+                    if (InvalidateCrew(crew.CrewId, "integrity"))
+                    {
+                        dirty = true;
+                        broadcastGrid = crew.GridEntityId;
+                    }
                     continue;
                 }
 
@@ -296,7 +346,11 @@ namespace HireCrew
                     var pilot = seatCtrl.Pilot;
                     if (pilot == null || pilot.EntityId != crew.CharacterEntityId.Value)
                     {
-                        InvalidateCrew(crew.CrewId, "ejected");
+                        if (InvalidateCrew(crew.CrewId, "ejected"))
+                        {
+                            dirty = true;
+                            broadcastGrid = crew.GridEntityId;
+                        }
                         continue;
                     }
                 }
@@ -304,8 +358,17 @@ namespace HireCrew
                 var seatBlock = seatEnt as IMyCubeBlock;
                 var wepBlock = wepEnt as IMyCubeBlock;
                 if (seatBlock == null || wepBlock == null || seatBlock.CubeGrid.EntityId != wepBlock.CubeGrid.EntityId)
-                    InvalidateCrew(crew.CrewId, "grid-split");
+                {
+                    if (InvalidateCrew(crew.CrewId, "grid-split"))
+                    {
+                        dirty = true;
+                        broadcastGrid = crew.GridEntityId;
+                    }
+                }
             }
+
+            if (dirty)
+                BroadcastRoster(broadcastGrid);
         }
 
         private void ReseatAllFromStore()
