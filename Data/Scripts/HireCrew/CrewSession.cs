@@ -217,11 +217,16 @@ namespace HireCrew
 
         private void HandleHire(HireRequest req, long identityId, ulong steamId)
         {
+            if (req == null) return;
+
             IMyCubeGrid grid;
             if (!TryGetGrid(req.GridEntityId, out grid)) return;
             if (!HasManagePermission(identityId, grid)) { Notify(steamId, "No permission"); return; }
 
-            var tier = (CrewTier)req.Tier;
+            var tierInt = req.Tier;
+            if (tierInt < (int)CrewTier.Recruit) tierInt = (int)CrewTier.Recruit;
+            if (tierInt > (int)CrewTier.Elite) tierInt = (int)CrewTier.Elite;
+            var tier = (CrewTier)tierInt;
             var price = CrewConfig.GetPrice(tier);
             string err;
             if (!CrewEconomy.TryCharge(identityId, price, out err))
@@ -246,6 +251,8 @@ namespace HireCrew
 
         private void HandleAssign(AssignRequest req, long identityId, ulong steamId)
         {
+            if (req == null) return;
+
             IMyCubeGrid grid;
             if (!TryGetGrid(req.GridEntityId, out grid)) return;
             if (!HasManagePermission(identityId, grid)) { Notify(steamId, "No permission"); return; }
@@ -282,7 +289,12 @@ namespace HireCrew
                 return;
             }
 
-            if (WeaponAi != null && WeaponAi.IsReady && !WeaponAi.IsCoreWeapon(weapon))
+            if (WeaponAi == null || !WeaponAi.IsReady)
+            {
+                Notify(steamId, "WeaponCore not ready");
+                return;
+            }
+            if (!WeaponAi.IsCoreWeapon(weapon))
             {
                 Notify(steamId, "Not a WeaponCore weapon");
                 return;
@@ -290,7 +302,7 @@ namespace HireCrew
 
             long charId;
             string seatErr;
-            if (!Seater.TrySeat(seat, crew.DisplayName, out charId, out seatErr))
+            if (!Seater.TrySeat(seat, crew.DisplayName, CollectKnownCharacterIds(), out charId, out seatErr))
             {
                 Notify(steamId, seatErr ?? "Seat failed");
                 return;
@@ -308,6 +320,8 @@ namespace HireCrew
 
         private void HandleDismiss(DismissRequest req, long identityId, ulong steamId)
         {
+            if (req == null) return;
+
             IMyCubeGrid grid;
             if (!TryGetGrid(req.GridEntityId, out grid)) return;
             if (!HasManagePermission(identityId, grid)) { Notify(steamId, "No permission"); return; }
@@ -351,25 +365,20 @@ namespace HireCrew
         private void WatchCrewIntegrity()
         {
             var snapshot = new List<CrewRecord>(Store.All);
-            var dirty = false;
-            long broadcastGrid = 0;
+            var dirtyGrids = new HashSet<long>();
             foreach (var crew in snapshot)
             {
                 if (crew.Status != CrewStatus.Seated) continue;
 
-                IMyEntity seatEnt = null, wepEnt = null, gridEnt = null;
+                IMyEntity seatEnt = null, wepEnt = null;
                 var seatOk = crew.SeatEntityId.HasValue && MyAPIGateway.Entities.TryGetEntityById(crew.SeatEntityId.Value, out seatEnt) && seatEnt != null && !seatEnt.Closed;
                 var wepOk = crew.WeaponEntityId.HasValue && MyAPIGateway.Entities.TryGetEntityById(crew.WeaponEntityId.Value, out wepEnt) && wepEnt != null && !wepEnt.Closed;
-                var gridOk = MyAPIGateway.Entities.TryGetEntityById(crew.GridEntityId, out gridEnt) && gridEnt != null && !gridEnt.Closed;
                 var alive = crew.CharacterEntityId.HasValue && Seater.IsAlive(crew.CharacterEntityId.Value);
 
-                if (!seatOk || !wepOk || !gridOk || !alive)
+                if (!seatOk || !wepOk || !alive)
                 {
                     if (InvalidateCrew(crew.CrewId, "integrity"))
-                    {
-                        dirty = true;
-                        broadcastGrid = crew.GridEntityId;
-                    }
+                        dirtyGrids.Add(crew.GridEntityId);
                     continue;
                 }
 
@@ -380,10 +389,7 @@ namespace HireCrew
                     if (pilot == null || pilot.EntityId != crew.CharacterEntityId.Value)
                     {
                         if (InvalidateCrew(crew.CrewId, "ejected"))
-                        {
-                            dirty = true;
-                            broadcastGrid = crew.GridEntityId;
-                        }
+                            dirtyGrids.Add(crew.GridEntityId);
                         continue;
                     }
                 }
@@ -393,15 +399,24 @@ namespace HireCrew
                 if (seatBlock == null || wepBlock == null || seatBlock.CubeGrid.EntityId != wepBlock.CubeGrid.EntityId)
                 {
                     if (InvalidateCrew(crew.CrewId, "grid-split"))
-                    {
-                        dirty = true;
-                        broadcastGrid = crew.GridEntityId;
-                    }
+                        dirtyGrids.Add(crew.GridEntityId);
+                    continue;
+                }
+
+                // Grid split can reassign CubeGrid.EntityId while seat+weapon stay together.
+                var seatGridId = seatBlock.CubeGrid.EntityId;
+                if (crew.GridEntityId != seatGridId)
+                {
+                    var oldGridId = crew.GridEntityId;
+                    crew.GridEntityId = seatGridId;
+                    Store.Upsert(crew);
+                    dirtyGrids.Add(oldGridId);
+                    dirtyGrids.Add(seatGridId);
                 }
             }
 
-            if (dirty)
-                BroadcastRoster(broadcastGrid);
+            foreach (var gridId in dirtyGrids)
+                BroadcastRoster(gridId);
         }
 
         private void ReseatAllFromStore()
@@ -430,7 +445,7 @@ namespace HireCrew
 
                 long charId;
                 string err;
-                if (!Seater.TrySeat(seat, crew.DisplayName, out charId, out err))
+                if (!Seater.TrySeat(seat, crew.DisplayName, CollectKnownCharacterIds(), out charId, out err))
                 {
                     InvalidateCrew(crew.CrewId, "reseat-failed");
                     continue;
@@ -454,6 +469,17 @@ namespace HireCrew
             MyAPIGateway.Players.GetPlayers(players);
             foreach (var p in players)
                 CrewNetworking.SendToPlayer(CrewNetworking.RosterMsg, data, p.SteamUserId);
+        }
+
+        private HashSet<long> CollectKnownCharacterIds()
+        {
+            var known = new HashSet<long>();
+            foreach (var c in Store.All)
+            {
+                if (c.CharacterEntityId.HasValue && c.CharacterEntityId.Value != 0)
+                    known.Add(c.CharacterEntityId.Value);
+            }
+            return known;
         }
 
         private static bool TryGetGrid(long id, out IMyCubeGrid grid)

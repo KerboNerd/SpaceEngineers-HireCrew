@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Sandbox.Game;
 using Sandbox.ModAPI;
 using VRage.Game.ModAPI;
@@ -11,8 +12,14 @@ namespace HireCrew
     {
         // Custom bot subtype from Data/Bots.sbc (killable; not vanilla Invulnerable Astronaut).
         private const string BotSubtype = "HireCrew_Gunner";
+        private const double NearbyFallbackRadius = 1.0;
 
         public bool TrySeat(IMyShipController seat, string displayName, out long characterEntityId, out string error)
+        {
+            return TrySeat(seat, displayName, null, out characterEntityId, out error);
+        }
+
+        public bool TrySeat(IMyShipController seat, string displayName, ISet<long> knownCharacterIds, out long characterEntityId, out string error)
         {
             characterEntityId = 0;
             error = null;
@@ -52,10 +59,26 @@ namespace HireCrew
                     IMyEntity ent;
                     if (MyAPIGateway.Entities.TryGetEntityById(spawnedId, out ent))
                         character = ent as IMyCharacter;
-                }
 
-                if (character == null)
-                    character = FindNearbyCharacter(pos, 3.0);
+                    // Prefer failing over scanning when SpawnBot returned an id we cannot resolve.
+                    if (character == null)
+                    {
+                        Despawn(spawnedId);
+                        error = "Failed to resolve spawned crew character";
+                        return false;
+                    }
+                }
+                else
+                {
+                    // Last resort only: no usable spawn id. Very close + not already tracked.
+                    string scanErr;
+                    character = FindNearbyCharacter(pos, NearbyFallbackRadius, knownCharacterIds, out scanErr);
+                    if (scanErr != null)
+                    {
+                        error = scanErr;
+                        return false;
+                    }
+                }
 
                 if (character == null)
                 {
@@ -122,18 +145,31 @@ namespace HireCrew
             return ch != null && ch.IsDead == false && !ch.Closed;
         }
 
-        private static IMyCharacter FindNearbyCharacter(Vector3D pos, double radius)
+        private static IMyCharacter FindNearbyCharacter(Vector3D pos, double radius, ISet<long> knownCharacterIds, out string error)
         {
+            error = null;
             IMyCharacter found = null;
+            var matches = 0;
             var r2 = radius * radius;
             MyAPIGateway.Entities.GetEntities(null, e =>
             {
                 var ch = e as IMyCharacter;
                 if (ch == null || ch.IsPlayer) return false;
+                if (knownCharacterIds != null && knownCharacterIds.Contains(ch.EntityId)) return false;
                 if (Vector3D.DistanceSquared(ch.GetPosition(), pos) <= r2)
+                {
+                    matches++;
                     found = ch;
+                }
                 return false;
             });
+
+            if (matches > 1)
+            {
+                error = "Ambiguous nearby crew character";
+                return null;
+            }
+
             return found;
         }
     }
