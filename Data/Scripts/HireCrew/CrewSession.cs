@@ -19,6 +19,7 @@ namespace HireCrew
         // Same instance required for UnregisterSecureMessageHandler.
         private Action<ushort, byte[], ulong, bool> _messageHandler;
         private int _tick;
+        private readonly HashSet<ulong> _rosterSyncedSteamIds = new HashSet<ulong>();
 
         public override void LoadData()
         {
@@ -63,7 +64,14 @@ namespace HireCrew
 
         private static byte[] TryLoadStoreBytes()
         {
-            // Prefer WorldStorage file; fall back to session variable.
+            // Prefer world variable (always written); fall back to WorldStorage file (best-effort).
+            string varB64;
+            if (MyAPIGateway.Utilities.GetVariable("HireCrew_Store", out varB64) && !string.IsNullOrEmpty(varB64))
+            {
+                try { return Convert.FromBase64String(varB64); }
+                catch { /* fall through to file */ }
+            }
+
             try
             {
                 if (MyAPIGateway.Utilities.FileExistsInWorldStorage("HireCrew.dat", typeof(CrewSession)))
@@ -78,15 +86,9 @@ namespace HireCrew
             }
             catch
             {
-                // Fall through to variable.
+                // No usable persistence.
             }
 
-            string varB64;
-            if (MyAPIGateway.Utilities.GetVariable("HireCrew_Store", out varB64) && !string.IsNullOrEmpty(varB64))
-            {
-                try { return Convert.FromBase64String(varB64); }
-                catch { return null; }
-            }
             return null;
         }
 
@@ -109,7 +111,38 @@ namespace HireCrew
             if (!MyAPIGateway.Multiplayer.IsServer || Store == null) return;
             _tick++;
             if (_tick % 60 != 0) return;
+            SyncRosterToNewPlayers();
             WatchCrewIntegrity();
+        }
+
+        /// <summary>
+        /// Join-time roster push: each new steam id gets a full RosterSync once present.
+        /// Throttled catch-up (no reliable PlayerJoined on all SE mod API versions).
+        /// </summary>
+        private void SyncRosterToNewPlayers()
+        {
+            var players = new List<IMyPlayer>();
+            MyAPIGateway.Players.GetPlayers(players);
+
+            var present = new HashSet<ulong>();
+            foreach (var p in players)
+            {
+                if (p == null) continue;
+                var steamId = p.SteamUserId;
+                present.Add(steamId);
+                if (_rosterSyncedSteamIds.Contains(steamId)) continue;
+
+                var sync = new RosterSync
+                {
+                    GridEntityId = 0,
+                    StoreBytes = Store.ToBytes()
+                };
+                CrewNetworking.SendToPlayer(CrewNetworking.RosterMsg, CrewNetworking.Serialize(sync), steamId);
+                _rosterSyncedSteamIds.Add(steamId);
+            }
+
+            // Drop departed players so reconnect gets a fresh push.
+            _rosterSyncedSteamIds.RemoveWhere(id => !present.Contains(id));
         }
 
         private void OnMessage(ushort id, byte[] data, ulong sender, bool fromServer)
