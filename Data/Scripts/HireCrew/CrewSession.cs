@@ -1,3 +1,4 @@
+using System;
 using VRage.Game.Components;
 
 namespace HireCrew
@@ -10,16 +11,26 @@ namespace HireCrew
         public WeaponAiBridge WeaponAi { get; private set; }
         public CrewStore Store { get; private set; }
 
+        // Same instance required for UnregisterSecureMessageHandler.
+        private Action<ushort, byte[], ulong, bool> _messageHandler;
+
         public override void LoadData()
         {
             Instance = this;
             Store = new CrewStore();
             WeaponAi = new WeaponAiBridge();
             WeaponAi.Load();
+            _messageHandler = OnMessage;
+            CrewNetworking.Register(_messageHandler);
         }
 
         protected override void UnloadData()
         {
+            if (_messageHandler != null)
+            {
+                CrewNetworking.Unregister(_messageHandler);
+                _messageHandler = null;
+            }
             if (WeaponAi != null)
                 WeaponAi.Unload();
             WeaponAi = null;
@@ -30,6 +41,11 @@ namespace HireCrew
 
         public override void UpdateAfterSimulation()
         {
+        }
+
+        private void OnMessage(ushort id, byte[] data, ulong sender, bool fromServer)
+        {
+            // filled in Task 5
         }
     }
 }
