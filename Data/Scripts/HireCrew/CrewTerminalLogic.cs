@@ -124,11 +124,18 @@ namespace HireCrew
                 var logic = GetLogic(b);
                 if (b.CubeGrid == null) return;
 
-                var taken = GetTakenSeatIds(b.CubeGrid.EntityId);
-                var seats = new List<IMyShipController>();
+                var gridId = b.CubeGrid.EntityId;
+                var taken = GetTakenSeatIds(gridId);
+                var seats = new List<IMyCockpit>();
                 var term = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(b.CubeGrid);
                 if (term != null)
-                    term.GetBlocksOfType(seats, s => s != null && !s.MarkedForClose && s.Pilot == null && !taken.Contains(s.EntityId));
+                    term.GetBlocksOfType(seats, s =>
+                        s != null
+                        && !s.MarkedForClose
+                        && s.CubeGrid != null
+                        && s.CubeGrid.EntityId == gridId
+                        && s.Pilot == null
+                        && !taken.Contains(s.EntityId));
 
                 foreach (var seat in seats)
                 {
@@ -169,11 +176,16 @@ namespace HireCrew
                 var session = CrewSession.Instance;
                 if (session == null || b.CubeGrid == null) return;
 
-                var manned = GetMannedWeaponIds(b.CubeGrid.EntityId);
+                var gridId = b.CubeGrid.EntityId;
+                var manned = GetMannedWeaponIds(gridId);
                 var blocks = new List<IMyTerminalBlock>();
                 var term = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(b.CubeGrid);
                 if (term != null)
-                    term.GetBlocksOfType(blocks, w => w != null && !w.MarkedForClose);
+                    term.GetBlocksOfType(blocks, w =>
+                        w != null
+                        && !w.MarkedForClose
+                        && w.CubeGrid != null
+                        && w.CubeGrid.EntityId == gridId);
 
                 foreach (var weapon in blocks)
                 {
