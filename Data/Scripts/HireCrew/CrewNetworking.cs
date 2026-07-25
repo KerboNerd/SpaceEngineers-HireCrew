@@ -9,6 +9,7 @@ namespace HireCrew
         public const ushort AssignMsg = 41732;
         public const ushort DismissMsg = 41733;
         public const ushort RosterMsg = 41734;
+        public const ushort NotifyMsg = 41735;
 
         public static void Register(Action<ushort, byte[], ulong, bool> handler)
         {
@@ -16,6 +17,7 @@ namespace HireCrew
             MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(AssignMsg, handler);
             MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(DismissMsg, handler);
             MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(RosterMsg, handler);
+            MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(NotifyMsg, handler);
         }
 
         public static void Unregister(Action<ushort, byte[], ulong, bool> handler)
@@ -24,6 +26,7 @@ namespace HireCrew
             MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(AssignMsg, handler);
             MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(DismissMsg, handler);
             MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(RosterMsg, handler);
+            MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(NotifyMsg, handler);
         }
 
         public static byte[] Serialize<T>(T obj)

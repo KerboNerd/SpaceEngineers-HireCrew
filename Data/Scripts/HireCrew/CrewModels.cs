@@ -58,4 +58,10 @@ namespace HireCrew
         [ProtoMember(1)] public long GridEntityId;
         [ProtoMember(2)] public byte[] StoreBytes;
     }
+
+    [ProtoContract]
+    public sealed class NotifyMessage
+    {
+        [ProtoMember(1)] public string Text;
+    }
 }
