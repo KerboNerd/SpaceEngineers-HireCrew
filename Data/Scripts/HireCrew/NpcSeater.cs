@@ -9,8 +9,8 @@ namespace HireCrew
 {
     public sealed class NpcSeater
     {
-        // SE bot subtype from Content/Data/Bots.sbc (not character subtype Default_Astronaut).
-        private const string BotSubtype = "Astronaut";
+        // Custom bot subtype from Data/Bots.sbc (killable; not vanilla Invulnerable Astronaut).
+        private const string BotSubtype = "HireCrew_Gunner";
 
         public bool TrySeat(IMyShipController seat, string displayName, out long characterEntityId, out string error)
         {
@@ -35,6 +35,7 @@ namespace HireCrew
                 return false;
             }
 
+            long spawnedId = 0;
             try
             {
                 var world = seat.WorldMatrix;
@@ -42,7 +43,7 @@ namespace HireCrew
                 var name = string.IsNullOrEmpty(displayName) ? "Crew" : displayName;
 
                 // SpawnBotAbsolute does not exist on this SE build; use oriented SpawnBot that returns entity id.
-                var spawnedId = MyVisualScriptLogicProvider.SpawnBot(
+                spawnedId = MyVisualScriptLogicProvider.SpawnBot(
                     BotSubtype, pos, world.Forward, world.Up, name);
 
                 IMyCharacter character = null;
@@ -62,16 +63,29 @@ namespace HireCrew
                     return false;
                 }
 
+                characterEntityId = character.EntityId;
+                spawnedId = characterEntityId;
+
                 if (!string.IsNullOrEmpty(displayName))
                     character.DisplayName = displayName;
 
                 cockpit.AttachPilot(character);
 
-                characterEntityId = character.EntityId;
+                if (cockpit.Pilot == null || cockpit.Pilot.EntityId != character.EntityId)
+                {
+                    Despawn(characterEntityId);
+                    characterEntityId = 0;
+                    error = "Failed to attach crew to seat";
+                    return false;
+                }
+
                 return true;
             }
             catch (Exception e)
             {
+                if (spawnedId != 0)
+                    Despawn(spawnedId);
+                characterEntityId = 0;
                 error = e.Message;
                 return false;
             }

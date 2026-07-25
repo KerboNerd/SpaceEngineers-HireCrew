@@ -180,6 +180,12 @@ namespace HireCrew
                 return;
             }
 
+            if (crew.Status == CrewStatus.Seated)
+            {
+                Notify(steamId, "Already assigned — dismiss first");
+                return;
+            }
+
             var err = CrewValidation.ValidateAssign(Store.GetForGrid(req.GridEntityId), req.CrewId, req.GridEntityId, req.SeatEntityId, req.WeaponEntityId);
             if (err != null) { Notify(steamId, err); return; }
 
@@ -228,15 +234,25 @@ namespace HireCrew
             IMyCubeGrid grid;
             if (!TryGetGrid(req.GridEntityId, out grid)) return;
             if (!HasManagePermission(identityId, grid)) { Notify(steamId, "No permission"); return; }
-            InvalidateCrew(req.CrewId, "dismissed");
+
+            var crew = Store.Get(req.CrewId);
+            if (crew == null || crew.GridEntityId != req.GridEntityId)
+            {
+                Notify(steamId, CrewValidation.ErrorCrewMissing);
+                return;
+            }
+
+            if (!InvalidateCrew(req.CrewId, "dismissed"))
+                return;
+
             Notify(steamId, "Crew dismissed");
             BroadcastRoster(req.GridEntityId);
         }
 
-        public void InvalidateCrew(string crewId, string reason)
+        public bool InvalidateCrew(string crewId, string reason)
         {
             var crew = Store.Get(crewId);
-            if (crew == null) return;
+            if (crew == null) return false;
 
             if (crew.WeaponEntityId.HasValue)
             {
@@ -252,6 +268,7 @@ namespace HireCrew
                 Seater.Despawn(crew.CharacterEntityId.Value);
 
             Store.Remove(crewId);
+            return true;
         }
 
         private void WatchCrewIntegrity()
@@ -271,6 +288,17 @@ namespace HireCrew
                 {
                     InvalidateCrew(crew.CrewId, "integrity");
                     continue;
+                }
+
+                var seatCtrl = seatEnt as IMyShipController;
+                if (seatCtrl != null && crew.CharacterEntityId.HasValue)
+                {
+                    var pilot = seatCtrl.Pilot;
+                    if (pilot == null || pilot.EntityId != crew.CharacterEntityId.Value)
+                    {
+                        InvalidateCrew(crew.CrewId, "ejected");
+                        continue;
+                    }
                 }
 
                 var seatBlock = seatEnt as IMyCubeBlock;
