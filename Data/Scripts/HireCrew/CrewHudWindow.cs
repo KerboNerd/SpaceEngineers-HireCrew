@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using RichHudFramework.UI;
 using RichHudFramework.UI.Client;
+using RichHudFramework.UI.Rendering;
 using Sandbox.ModAPI;
 using VRage.Game;
 using VRage.Game.ModAPI;
@@ -59,6 +60,7 @@ namespace HireCrew
     {
         private const int MaxRows = 5;
         private const float RowH = 56f;
+        private const float HeaderRowH = 26f;
         private const float RowGap = 6f;
         private const float PanelW = 580f;
         private const float PanelH = 540f;
@@ -71,6 +73,17 @@ namespace HireCrew
         private static float RowYAt(int index)
         {
             return RowTopY - index * (RowH + RowGap);
+        }
+
+        private float RowCenterY(int index)
+        {
+            float y = RowTopY;
+            for (int i = 0; i < index; i++)
+            {
+                float h = _rowHeights[i] > 0f ? _rowHeights[i] : RowH;
+                y -= h + RowGap;
+            }
+            return y;
         }
 
         private readonly CrewHudModel _model;
@@ -91,6 +104,7 @@ namespace HireCrew
         private readonly Label[] _moraleLabels = new Label[MaxRows];
         private readonly string[] _rowCrewIds = new string[MaxRows];
         private readonly long[] _rowEntityIds = new long[MaxRows];
+        private readonly float[] _rowHeights = new float[MaxRows];
         private int _rowCount;
         private int _listTotalCount;
 
@@ -109,6 +123,9 @@ namespace HireCrew
         private CrewHudButton _btnBack;
         private CrewHudButton _btnCancel;
         private CrewHudButton _btnClose;
+        private CrewHudButton _btnScrollUp;
+        private CrewHudButton _btnScrollDown;
+        private Label _scrollHint;
 
         private readonly List<IMySlimBlock> _blockScratch = new List<IMySlimBlock>(64);
         private readonly List<IMyTerminalBlock> _seatScratch = new List<IMyTerminalBlock>(32);
@@ -136,15 +153,10 @@ namespace HireCrew
             _bg = new TexturedBox(this)
             {
                 DimAlignment = DimAlignments.Both,
-                Color = new Color(16, 22, 30, 235),
+                Material = CrewHudIcons.CrewPanel,
+                MatAlignment = MaterialAlignment.StretchToFit,
+                Color = Color.White,
                 ZOffset = -2,
-            };
-            new BorderBox(this)
-            {
-                DimAlignment = DimAlignments.Both,
-                Color = new Color(100, 160, 200, 255),
-                Thickness = 2f,
-                ZOffset = -1,
             };
 
             // Top|InnerV pins the child's top to the panel top; negative Y offset moves down.
@@ -180,6 +192,18 @@ namespace HireCrew
                 Format = GlyphFormat.Blueish.WithAlignment(TextAlignment.Center),
                 Text = "",
                 ZOffset = 2,
+                Visible = false,
+            };
+
+            _scrollHint = new Label(this)
+            {
+                ParentAlignment = ParentAlignments.Bottom | ParentAlignments.InnerH | ParentAlignments.InnerV,
+                Offset = new Vector2(0f, 80f),
+                Size = new Vector2(PanelW - 80f, 18f),
+                AutoResize = false,
+                Format = new GlyphFormat(new Color(140, 200, 230, 255), TextAlignment.Center, 1f),
+                Text = "",
+                ZOffset = 5,
                 Visible = false,
             };
 
@@ -265,22 +289,26 @@ namespace HireCrew
             _btnBack = MakeBtn("Back", 0f, 0f, true);
             _btnCancel = MakeBtn("Cancel", 0f, 155f, true);
             _btnClose = MakeBtn("Close", 0f, 165f, true);
+            _btnScrollUp = MakeBtn("^", 0f, 0f, false);
+            _btnScrollDown = MakeBtn("v", 0f, 0f, false);
+            PlaceScrollBtn(_btnScrollUp, -36f);
+            PlaceScrollBtn(_btnScrollDown, -372f);
 
-            PlaceBottom(_btnAssign, -230f, 72f);
-            PlaceBottom(_btnUnassign, -153f, 72f);
-            PlaceBottom(_btnQuarters, -76f, 72f);
-            PlaceBottom(_btnTrain, 0f, 72f);
-            PlaceBottom(_btnDismiss, 76f, 72f);
-            PlaceBottom(_btnBulk, 153f, 72f);
-            PlaceBottom(_btnClose, 230f, 72f);
-            PlaceBottom(_btnBulkAssign, -153f, 100f);
-            PlaceBottom(_btnClearBulk, 0f, 88f);
-            PlaceBottom(_btnBulkSeat, -200f, 88f);
-            PlaceBottom(_btnBulkWeapon, -100f, 88f);
-            PlaceBottom(_btnNext, -155f);
-            PlaceBottom(_btnConfirm, -155f);
+            PlaceBottom(_btnAssign, -234f, 80f);
+            PlaceBottom(_btnUnassign, -156f, 80f);
+            PlaceBottom(_btnQuarters, -78f, 80f);
+            PlaceBottom(_btnTrain, 0f, 80f);
+            PlaceBottom(_btnDismiss, 78f, 80f);
+            PlaceBottom(_btnBulk, 156f, 80f);
+            PlaceBottom(_btnClose, 234f, 80f);
+            PlaceBottom(_btnBulkAssign, -150f, 110f);
+            PlaceBottom(_btnClearBulk, 0f, 98f);
+            PlaceBottom(_btnBulkSeat, -200f, 98f);
+            PlaceBottom(_btnBulkWeapon, -100f, 98f);
+            PlaceBottom(_btnNext, -150f);
+            PlaceBottom(_btnConfirm, -150f);
             PlaceBottom(_btnBack, 0f);
-            PlaceBottom(_btnCancel, 155f);
+            PlaceBottom(_btnCancel, 150f);
 
             _btnAssign.MouseInput.LeftReleased += (s, a) => BeginAssign();
             _btnUnassign.MouseInput.LeftReleased += (s, a) => BeginUnassign();
@@ -297,8 +325,32 @@ namespace HireCrew
             _btnBack.MouseInput.LeftReleased += (s, a) => { _model.WizardBack(); Refresh(); };
             _btnCancel.MouseInput.LeftReleased += (s, a) => RequestClose();
             _btnClose.MouseInput.LeftReleased += (s, a) => RequestClose();
+            _btnScrollUp.MouseInput.LeftReleased += (s, a) => ScrollListBy(-1);
+            _btnScrollDown.MouseInput.LeftReleased += (s, a) => ScrollListBy(1);
 
             _built = true;
+        }
+
+        private void PlaceScrollBtn(CrewHudButton btn, float y)
+        {
+            var accent = new Color(55, 105, 140, 255);
+            btn.ParentAlignment = ParentAlignments.Top | ParentAlignments.InnerH | ParentAlignments.InnerV;
+            btn.Offset = new Vector2(PanelW * 0.5f - 20f, y);
+            btn.FitToTextElement = true;
+            btn.Size = new Vector2(32f, 26f);
+            btn.TextSize = new Vector2(24f, 20f);
+            btn.BaseColor = accent;
+            btn.Color = accent;
+            btn.HighlightColor = new Color(90, 150, 195, 255);
+            btn.ZOffset = 6;
+            btn.Visible = false;
+        }
+
+        private void ScrollListBy(int delta)
+        {
+            if (_listTotalCount <= MaxRows) return;
+            _model.AdjustListScroll(delta, _listTotalCount, MaxRows);
+            Refresh();
         }
 
         private Label MakeColumnLabel(float width, TextAlignment align)
@@ -324,7 +376,7 @@ namespace HireCrew
                     ? (ParentAlignments.Bottom | ParentAlignments.InnerH | ParentAlignments.InnerV)
                     : (ParentAlignments.Top | ParentAlignments.InnerH | ParentAlignments.InnerV),
                 Offset = new Vector2(x, y),
-                Size = new Vector2(140f, 36f),
+                Size = new Vector2(152f, 36f),
                 AutoResize = false,
                 // Keep true for action buttons so Width/Height size the text board (labels visible).
                 FitToTextElement = true,
@@ -338,11 +390,11 @@ namespace HireCrew
             };
             btn.SetTextIfChanged(text ?? "");
             // Re-apply size after text so FitToTextElement populates TextSize.
-            btn.Size = new Vector2(140f, 36f);
+            btn.Size = new Vector2(152f, 36f);
             return btn;
         }
 
-        private static void PlaceBottom(CrewHudButton btn, float x, float width = 140f)
+        private static void PlaceBottom(CrewHudButton btn, float x, float width = 152f)
         {
             // Bottom without InnerV aligns the child's top to the parent's bottom (outside).
             btn.ParentAlignment = ParentAlignments.Bottom | ParentAlignments.InnerH | ParentAlignments.InnerV;
@@ -362,6 +414,7 @@ namespace HireCrew
         {
             base.HandleInput(cursorPos);
             if (!Visible) return;
+            if (_listTotalCount <= MaxRows) return;
 
             bool scrolled = false;
             if (SharedBinds.PageUp.IsNewPressed)
@@ -374,14 +427,31 @@ namespace HireCrew
                 _model.AdjustListScroll(MaxRows, _listTotalCount, MaxRows);
                 scrolled = true;
             }
-            else if ((State & HudElementStates.IsMouseInBounds) > 0)
+            else
             {
-                if (SharedBinds.MousewheelUp.IsPressed)
+                // Panel has UseCursor=false so IsMouseInBounds never sticks; read wheel while open.
+                int wheel = 0;
+                try
+                {
+                    if (MyAPIGateway.Input != null)
+                        wheel = MyAPIGateway.Input.DeltaMouseScrollWheelValue();
+                }
+                catch { }
+
+                if (wheel == 0)
+                {
+                    if (SharedBinds.MousewheelUp.IsPressed)
+                        wheel = 1;
+                    else if (SharedBinds.MousewheelDown.IsPressed)
+                        wheel = -1;
+                }
+
+                if (wheel > 0)
                 {
                     _model.AdjustListScroll(-1, _listTotalCount, MaxRows);
                     scrolled = true;
                 }
-                else if (SharedBinds.MousewheelDown.IsPressed)
+                else if (wheel < 0)
                 {
                     _model.AdjustListScroll(1, _listTotalCount, MaxRows);
                     scrolled = true;
@@ -436,9 +506,18 @@ namespace HireCrew
                     return;
                 }
             }
-            else if (CrewHudModel.IsGridBoundScreen(_model.Screen))
+            else
             {
-                _model.GoHome();
+                var ownedForFocus = RosterForManagedGrid(session);
+                if (!_model.IsFocusStillValid(ownedForFocus))
+                    _model.ClearFocusedGrid();
+
+                if (CrewHudModel.IsGridBoundScreen(_model.Screen))
+                {
+                    bool allowUnassign = _model.Screen == CrewHudScreen.UnassignPick && _model.HasFocusedGrid;
+                    if (!allowUnassign)
+                        _model.GoHome();
+                }
             }
 
             string gridName = grid != null && !string.IsNullOrEmpty(grid.CustomName) ? grid.CustomName : "Grid";
@@ -466,8 +545,9 @@ namespace HireCrew
             CrewRecord bulkEditCrew = bulkEdit != null ? FindCrewById(session, bulkEdit.CrewId) : null;
             bool bulkNeedsWeapon = bulkEditCrew != null && CrewConfig.NeedsWeapon(bulkEditCrew.Role);
 
+            bool offshipFocused = poolOnly && _model.HasFocusedGrid;
             _btnAssign.Visible = home && !poolOnly && !bulkOn;
-            _btnUnassign.Visible = home && !poolOnly && !bulkOn;
+            _btnUnassign.Visible = home && !bulkOn && (!poolOnly || offshipFocused);
             _btnQuarters.Visible = home && !poolOnly && !bulkOn;
             _btnTrain.Visible = home && !bulkOn;
             _btnDismiss.Visible = home && !bulkOn;
@@ -478,8 +558,8 @@ namespace HireCrew
             _btnBulkWeapon.Visible = bulkMap;
             _btnClose.Visible = home;
             _btnNext.Visible = !poolOnly && (assignCrew || (assignSeat && !seatOnlyAssign) || quartersCrew);
-            _btnConfirm.Visible = dismissPick || trainConfirm || cancelTrainConfirm || bulkMap
-                || (!poolOnly && (assignWeapon || unassignPick || quartersSlots || (assignSeat && seatOnlyAssign)));
+            _btnConfirm.Visible = dismissPick || unassignPick || trainConfirm || cancelTrainConfirm || bulkMap
+                || (!poolOnly && (assignWeapon || quartersSlots || (assignSeat && seatOnlyAssign)));
             _btnBack.Visible = !home;
             _btnCancel.Visible = !home;
 
@@ -493,11 +573,20 @@ namespace HireCrew
                         bulkCtx += " · Bulk limit " + CrewHudModel.BulkSelectionCap;
                     _context.Text = bulkCtx;
                 }
+                else if (poolOnly && _model.CanUnassignWithFocus(selectedHome))
+                {
+                    string name = string.IsNullOrEmpty(selectedHome.DisplayName)
+                        ? CrewConfig.RoleLabel(selectedHome.Role)
+                        : selectedHome.DisplayName;
+                    _context.Text = "Selected: " + name + " — Stationed · Unassign, Train, or Dismiss";
+                }
                 else
                     _context.Text = CrewHudModel.FormatHomeContext(selectedHome, !poolOnly);
 
                 bool canAssign = !poolOnly && !bulkOn && CrewHudModel.CanAssignHome(selectedHome);
-                bool canUnassign = !poolOnly && !bulkOn && CrewHudModel.CanUnassignHome(selectedHome);
+                bool canUnassign = !bulkOn && (
+                    (!poolOnly && CrewHudModel.CanUnassignHome(selectedHome))
+                    || (poolOnly && _model.CanUnassignWithFocus(selectedHome)));
                 bool canQuarters = !poolOnly && !bulkOn && CrewHudModel.CanQuartersHome(selectedHome);
                 bool canDismiss = !bulkOn && CrewHudModel.CanDismissHome(selectedHome);
                 bool canTrain = !bulkOn && (selectedTraining
@@ -529,29 +618,29 @@ namespace HireCrew
             if (bulkMap)
             {
                 // Five equal slots across PanelW 580: Seat / Weapon / Confirm / Back / Cancel
-                PlaceBottom(_btnBulkSeat, -220f, 96f);
-                PlaceBottom(_btnBulkWeapon, -110f, 96f);
-                PlaceBottom(_btnConfirm, 0f, 96f);
-                PlaceBottom(_btnBack, 110f, 96f);
-                PlaceBottom(_btnCancel, 220f, 96f);
+                PlaceBottom(_btnBulkSeat, -216f, 106f);
+                PlaceBottom(_btnBulkWeapon, -108f, 106f);
+                PlaceBottom(_btnConfirm, 0f, 106f);
+                PlaceBottom(_btnBack, 108f, 106f);
+                PlaceBottom(_btnCancel, 216f, 106f);
                 SetHomeAction(_btnBulkSeat, bulkEdit != null, ActionBase);
                 SetHomeAction(_btnBulkWeapon, bulkEdit != null && bulkNeedsWeapon, ActionBase);
                 SetHomeAction(_btnConfirm, IsBulkMapConfirmReady(session), ActionAssign);
             }
             else if (home && !poolOnly && bulkOn)
             {
-                PlaceBottom(_btnBulkAssign, -180f, 120f);
-                PlaceBottom(_btnClearBulk, -40f, 88f);
-                PlaceBottom(_btnBulk, 80f, 88f);
-                PlaceBottom(_btnClose, 200f, 88f);
+                PlaceBottom(_btnBulkAssign, -170f, 132f);
+                PlaceBottom(_btnClearBulk, -30f, 98f);
+                PlaceBottom(_btnBulk, 75f, 98f);
+                PlaceBottom(_btnClose, 190f, 98f);
             }
             else
             {
-                PlaceBottom(_btnConfirm, -155f);
+                PlaceBottom(_btnConfirm, -150f);
                 PlaceBottom(_btnBack, 0f);
-                PlaceBottom(_btnCancel, 155f);
-                PlaceBottom(_btnBulk, 153f, 72f);
-                PlaceBottom(_btnClose, 230f, 72f);
+                PlaceBottom(_btnCancel, 150f);
+                PlaceBottom(_btnBulk, 156f, 80f);
+                PlaceBottom(_btnClose, 234f, 80f);
             }
 
             if (dismissPick)
@@ -571,9 +660,19 @@ namespace HireCrew
             {
                 _header.Text = bulkOn ? "Crew Roster · Bulk" : "Crew Roster";
                 FillHome(session);
-                _status.Text = ScrollStatus(poolOnly
-                    ? "Off ship · train & dismiss only"
-                    : (bulkOn ? "Tap unassigned crew to multi-select" : gridName + " (faction/personal pool)"));
+                if (poolOnly)
+                {
+                    if (_model.HasFocusedGrid)
+                        _status.Text = ScrollStatus("Off ship · viewing " + ResolveGridLabel(_model.FocusedGridId));
+                    else
+                        _status.Text = ScrollStatus("Off ship · select a grid");
+                }
+                else
+                {
+                    _status.Text = ScrollStatus(bulkOn
+                        ? "Tap unassigned crew to multi-select"
+                        : gridName + " (faction/personal pool)");
+                }
             }
             else if (trainConfirm)
             {
@@ -652,6 +751,8 @@ namespace HireCrew
                 FillQuartersPickBlock(session, grid);
                 _status.Text = ScrollStatus("Tap block to assign");
             }
+
+            UpdateScrollChrome();
         }
 
         private string ScrollStatus(string baseText)
@@ -660,7 +761,41 @@ namespace HireCrew
             int start = _model.ListScrollOffset;
             int end = start + _rowCount;
             if (end > _listTotalCount) end = _listTotalCount;
-            return baseText + "  (" + (start + 1) + "-" + end + "/" + _listTotalCount + ", PgUp/PgDn)";
+            return baseText + "  ·  " + (start + 1) + "-" + end + " of " + _listTotalCount;
+        }
+
+        private void UpdateScrollChrome()
+        {
+            if (_btnScrollUp == null || _btnScrollDown == null || _scrollHint == null)
+                return;
+
+            bool canScroll = _listTotalCount > MaxRows;
+            bool moreAbove = canScroll && _model.ListScrollOffset > 0;
+            int visible = _rowCount > 0 ? _rowCount : MaxRows;
+            bool moreBelow = canScroll && (_model.ListScrollOffset + visible) < _listTotalCount;
+
+            _btnScrollUp.Visible = canScroll;
+            _btnScrollDown.Visible = canScroll;
+            _scrollHint.Visible = canScroll;
+
+            if (!canScroll)
+            {
+                _scrollHint.Text = "";
+                return;
+            }
+
+            var scrollAccent = new Color(55, 105, 140, 255);
+            SetHomeAction(_btnScrollUp, moreAbove, scrollAccent);
+            SetHomeAction(_btnScrollDown, moreBelow, scrollAccent);
+
+            if (moreAbove && moreBelow)
+                _scrollHint.Text = "List scrolls · mouse wheel or ^ / v";
+            else if (moreBelow)
+                _scrollHint.Text = "More below · mouse wheel or v";
+            else if (moreAbove)
+                _scrollHint.Text = "More above · mouse wheel or ^";
+            else
+                _scrollHint.Text = "Scrollable list · mouse wheel or ^ / v";
         }
 
         private void ClearRows()
@@ -671,11 +806,46 @@ namespace HireCrew
                 _rows[i].Visible = false;
                 _rowCrewIds[i] = null;
                 _rowEntityIds[i] = 0;
+                _rowHeights[i] = 0f;
                 HideMoraleBar(i);
                 HideRoleIcon(i);
                 HideStarIcons(i);
                 HideColumnLabels(i);
             }
+        }
+
+        private void AddSectionHeader(string text)
+        {
+            if (_rowCount >= MaxRows) return;
+            int i = _rowCount++;
+            _rowCrewIds[i] = null;
+            _rowEntityIds[i] = 0;
+            _rowHeights[i] = HeaderRowH;
+            _rows[i].Visible = true;
+            _rows[i].SetInteractive(false);
+            // Accent strip — reads as a section label, not a clickable row.
+            var strip = new Color(45, 78, 98, 255);
+            _rows[i].BaseColor = strip;
+            _rows[i].HighlightColor = strip;
+            HideMoraleBar(i);
+
+            float rowWidth = PanelW - 28f;
+            float rowY = RowCenterY(i);
+            _rows[i].Offset = new Vector2(0f, rowY);
+            _rows[i].SetTextIfChanged(text ?? "");
+            _rows[i].Format = new GlyphFormat(
+                new Color(160, 210, 235, 255),
+                TextAlignment.Center,
+                1f);
+            _rows[i].TextPadding = new Vector2(8f, 2f);
+            _rows[i].FitToTextElement = false;
+            _rows[i].Size = new Vector2(rowWidth, HeaderRowH);
+            _rows[i].TextSize = new Vector2(rowWidth - 16f, HeaderRowH - 4f);
+            _rows[i].textElement.ParentAlignment = ParentAlignments.Center;
+            _rows[i].textElement.Offset = Vector2.Zero;
+            HideRoleIcon(i);
+            HideStarIcons(i);
+            HideColumnLabels(i);
         }
 
         private void AddRow(string text, string crewId, long entityId, bool selected, bool interactive)
@@ -694,6 +864,7 @@ namespace HireCrew
             int i = _rowCount++;
             _rowCrewIds[i] = crewId;
             _rowEntityIds[i] = entityId;
+            _rowHeights[i] = RowH;
             _rows[i].Visible = true;
             _rows[i].SetInteractive(interactive);
             _rows[i].BaseColor = selected
@@ -712,7 +883,7 @@ namespace HireCrew
             }
 
             float rowWidth = PanelW - 28f;
-            float rowY = RowYAt(i);
+            float rowY = RowCenterY(i);
             _rows[i].Offset = new Vector2(0f, rowY);
             _rows[i].SetTextIfChanged(text ?? "");
             _rows[i].Format = GlyphFormat.White.WithAlignment(TextAlignment.Center);
@@ -733,6 +904,7 @@ namespace HireCrew
             int i = _rowCount++;
             _rowCrewIds[i] = r.CrewId;
             _rowEntityIds[i] = 0;
+            _rowHeights[i] = RowH;
             _rows[i].Visible = true;
             _rows[i].SetInteractive(interactive);
             _rows[i].BaseColor = selected
@@ -801,7 +973,7 @@ namespace HireCrew
             float textW = rowWidth - leftReserve - rightPad;
             if (textW < 120f) textW = 120f;
 
-            float rowY = RowYAt(i);
+            float rowY = RowCenterY(i);
             float line1Y = rowY - CardPadTop;
             float line2Y = rowY - CardPadTop - CardLineH - 2f;
 
@@ -860,11 +1032,29 @@ namespace HireCrew
             }
         }
 
+        private sealed class OffshipHomeRow
+        {
+            public bool IsHeader;
+            public bool IsGrid;
+            public string Text;
+            public CrewRecord Crew;
+            public long GridId;
+            public bool Selected;
+            public bool Interactive;
+        }
+
         private void FillHome(CrewSession session)
         {
             ClearRows();
             if (_model.BulkMode)
                 _model.PruneBulkSelection(id => FindCrewById(session, id));
+
+            if (!_model.HasManagedGrid)
+            {
+                FillHomeOffship(session);
+                return;
+            }
+
             var roster = RosterForManagedGrid(session);
             _listTotalCount = roster.Count;
             int start = _model.ClampListScroll(_listTotalCount, MaxRows);
@@ -879,6 +1069,123 @@ namespace HireCrew
             }
             if (_rowCount == 0)
                 AddRow("(roster empty — hire at a Crew Hiring Desk)", null, 0L, false, false);
+        }
+
+        private void FillHomeOffship(CrewSession session)
+        {
+            var roster = RosterForManagedGrid(session);
+            if (roster == null || roster.Count == 0)
+            {
+                _listTotalCount = 1;
+                _model.ClampListScroll(_listTotalCount, MaxRows);
+                AddRow("(roster empty — hire at a Crew Hiring Desk)", null, 0L, false, false);
+                return;
+            }
+
+            var gridIds = CrewHudModel.CollectCrewedGridIds(roster);
+            for (int i = gridIds.Count - 1; i >= 0; i--)
+            {
+                IMyEntity ent;
+                if (!MyAPIGateway.Entities.TryGetEntityById(gridIds[i], out ent) || ent == null
+                    || !(ent is IMyCubeGrid))
+                    gridIds.RemoveAt(i);
+            }
+
+            var logical = new List<OffshipHomeRow>();
+            logical.Add(new OffshipHomeRow { IsHeader = true, Text = "\u2014 Grids \u2014", Interactive = false });
+            if (gridIds.Count == 0)
+            {
+                logical.Add(new OffshipHomeRow
+                {
+                    Text = "(none with crew)",
+                    Interactive = false
+                });
+            }
+            else
+            {
+                for (int i = 0; i < gridIds.Count; i++)
+                {
+                    long id = gridIds[i];
+                    logical.Add(new OffshipHomeRow
+                    {
+                        IsGrid = true,
+                        Text = ResolveGridLabel(id),
+                        GridId = id,
+                        Selected = id == _model.FocusedGridId,
+                        Interactive = true
+                    });
+                }
+            }
+
+            if (_model.HasFocusedGrid)
+            {
+                string focusLabel = ResolveGridLabel(_model.FocusedGridId);
+                logical.Add(new OffshipHomeRow
+                {
+                    IsHeader = true,
+                    Text = "\u2014 On " + focusLabel + " \u2014",
+                    Interactive = false
+                });
+                for (int i = 0; i < roster.Count; i++)
+                {
+                    var r = roster[i];
+                    if (r == null || r.Status != CrewStatus.Seated || r.GridEntityId != _model.FocusedGridId)
+                        continue;
+                    logical.Add(new OffshipHomeRow
+                    {
+                        Crew = r,
+                        Selected = string.Equals(r.CrewId, _model.SelectedCrewId, StringComparison.Ordinal),
+                        Interactive = true
+                    });
+                }
+            }
+
+            logical.Add(new OffshipHomeRow { IsHeader = true, Text = "\u2014 Unassigned \u2014", Interactive = false });
+            int unassignedCount = 0;
+            for (int i = 0; i < roster.Count; i++)
+            {
+                var r = roster[i];
+                if (r == null || r.Status != CrewStatus.Unassigned) continue;
+                unassignedCount++;
+                logical.Add(new OffshipHomeRow
+                {
+                    Crew = r,
+                    Selected = string.Equals(r.CrewId, _model.SelectedCrewId, StringComparison.Ordinal),
+                    Interactive = true
+                });
+            }
+            if (unassignedCount == 0)
+            {
+                logical.Add(new OffshipHomeRow
+                {
+                    Text = "(none unassigned)",
+                    Interactive = false
+                });
+            }
+
+            _listTotalCount = logical.Count;
+            int start = _model.ClampListScroll(_listTotalCount, MaxRows);
+            for (int i = start; i < logical.Count && _rowCount < MaxRows; i++)
+            {
+                var row = logical[i];
+                if (row == null) continue;
+                if (row.Crew != null)
+                {
+                    AddCrewRow(row.Crew, row.Selected, row.Interactive, true);
+                    continue;
+                }
+                if (row.IsHeader)
+                {
+                    AddSectionHeader(row.Text);
+                    continue;
+                }
+                if (row.IsGrid)
+                {
+                    AddRow(row.Text, null, row.GridId, row.Selected, true);
+                    continue;
+                }
+                AddRow(row.Text, null, 0L, false, false);
+            }
         }
 
         private void FillBulkMap(CrewSession session)
@@ -1071,7 +1378,7 @@ namespace HireCrew
             }
 
             float rowWidth = PanelW - 28f;
-            float rowY = RowYAt(index);
+            float rowY = RowCenterY(index);
             float iconY = rowY - (RowH - RoleIconSize) * 0.5f;
             float iconCenterX = -(rowWidth * 0.5f) + IconLeftPad + RoleIconSize * 0.5f;
             icon.Material = CrewHudIcons.ForRole(role.Value);
@@ -1090,7 +1397,7 @@ namespace HireCrew
             }
 
             float rowWidth = PanelW - 28f;
-            float rowY = RowYAt(index);
+            float rowY = RowCenterY(index);
             float line1Y = rowY - CardPadTop;
             float iconY = line1Y - (CardLineH - StarIconSize) * 0.5f;
             float starStripW = CrewHudIcons.StarRowWidth(StarIconSize, StarIconGap);
@@ -1125,7 +1432,7 @@ namespace HireCrew
             float trackLeft = trackCenterX - MoraleBarW * 0.5f;
             float fillCenterX = trackLeft + fillW * 0.5f;
             // Morale sits on line 2 (right), under the star strip.
-            float rowY = RowYAt(index);
+            float rowY = RowCenterY(index);
             float line2Y = rowY - CardPadTop - CardLineH - 2f;
             float barY = line2Y - (CardLineH - MoraleBarH) * 0.5f;
 
@@ -1452,6 +1759,10 @@ namespace HireCrew
                     }
                     else
                         _model.SelectedCrewId = _rowCrewIds[index];
+                }
+                else if (!_model.HasManagedGrid && _rowEntityIds[index] != 0)
+                {
+                    _model.ToggleFocusedGrid(_rowEntityIds[index]);
                 }
             }
             else if (_model.Screen == CrewHudScreen.AssignCrew ||
