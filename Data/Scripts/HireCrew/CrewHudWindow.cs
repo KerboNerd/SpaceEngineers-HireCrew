@@ -528,14 +528,30 @@ namespace HireCrew
 
             if (bulkMap)
             {
-                PlaceBottom(_btnConfirm, 100f, 100f);
+                // Five equal slots across PanelW 580: Seat / Weapon / Confirm / Back / Cancel
+                PlaceBottom(_btnBulkSeat, -220f, 96f);
+                PlaceBottom(_btnBulkWeapon, -110f, 96f);
+                PlaceBottom(_btnConfirm, 0f, 96f);
+                PlaceBottom(_btnBack, 110f, 96f);
+                PlaceBottom(_btnCancel, 220f, 96f);
                 SetHomeAction(_btnBulkSeat, bulkEdit != null, ActionBase);
                 SetHomeAction(_btnBulkWeapon, bulkEdit != null && bulkNeedsWeapon, ActionBase);
                 SetHomeAction(_btnConfirm, IsBulkMapConfirmReady(session), ActionAssign);
             }
+            else if (home && !poolOnly && bulkOn)
+            {
+                PlaceBottom(_btnBulkAssign, -180f, 120f);
+                PlaceBottom(_btnClearBulk, -40f, 88f);
+                PlaceBottom(_btnBulk, 80f, 88f);
+                PlaceBottom(_btnClose, 200f, 88f);
+            }
             else
             {
                 PlaceBottom(_btnConfirm, -155f);
+                PlaceBottom(_btnBack, 0f);
+                PlaceBottom(_btnCancel, 155f);
+                PlaceBottom(_btnBulk, 153f, 72f);
+                PlaceBottom(_btnClose, 230f, 72f);
             }
 
             if (dismissPick)
