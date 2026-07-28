@@ -5,6 +5,13 @@ tests/**/bin/
 tests/**/obj/
 *.dll
 *.pdb
+*.exe
+*.dmp
+
+# Local SE / Steam / publish (do not publish)
+metadata.mod
+workshop/
+tools/texconv/
 
 # Local agent / OS junk
 .superpowers/
