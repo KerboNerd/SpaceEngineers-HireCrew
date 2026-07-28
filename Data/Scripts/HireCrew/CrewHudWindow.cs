@@ -58,14 +58,25 @@ namespace HireCrew
     /// </summary>
     public sealed class CrewHudWindow : HudElementBase
     {
-        private const int MaxRows = 5;
+        private const int MaxRows = 6;
         private const float RowH = 56f;
         private const float HeaderRowH = 26f;
         private const float RowGap = 6f;
         private const float PanelW = 580f;
         private const float PanelH = 540f;
+        /// <summary>Extra margin so the textured frame is larger than content layout.</summary>
+        private const float BgPad = 48f;
+        private const float ScrollArrowX = PanelW * 0.5f + 12f;
+        private const float ScrollUpY = -36f;
+        private const float ScrollDownY = -434f;
+        private const float ScrollBtnH = 26f;
+        private const float ScrollTrackW = 6f;
+        private const float ScrollThumbW = 10f;
+        private const float ScrollThumbMinH = 28f;
         private const float MoraleBarW = 52f;
         private const float MoraleBarH = 16f;
+        private const float RepairBtnW = 58f;
+        private const float RepairBtnH = 20f;
         private const float RowTopY = -64f;
         private const float CardLineH = 20f;
         private const float CardPadTop = 6f;
@@ -102,6 +113,7 @@ namespace HireCrew
         private readonly TexturedBox[] _moraleTracks = new TexturedBox[MaxRows];
         private readonly TexturedBox[] _moraleFills = new TexturedBox[MaxRows];
         private readonly Label[] _moraleLabels = new Label[MaxRows];
+        private readonly CrewHudButton[] _rowRepairBtns = new CrewHudButton[MaxRows];
         private readonly string[] _rowCrewIds = new string[MaxRows];
         private readonly long[] _rowEntityIds = new long[MaxRows];
         private readonly float[] _rowHeights = new float[MaxRows];
@@ -125,6 +137,8 @@ namespace HireCrew
         private CrewHudButton _btnClose;
         private CrewHudButton _btnScrollUp;
         private CrewHudButton _btnScrollDown;
+        private TexturedBox _scrollTrack;
+        private TexturedBox _scrollThumb;
         private Label _scrollHint;
 
         private readonly List<IMySlimBlock> _blockScratch = new List<IMySlimBlock>(64);
@@ -152,7 +166,9 @@ namespace HireCrew
 
             _bg = new TexturedBox(this)
             {
-                DimAlignment = DimAlignments.Both,
+                // Larger than PanelW/H; content keeps using Panel* sizes/offsets.
+                Size = new Vector2(PanelW + BgPad * 2f, PanelH + BgPad * 2f),
+                Offset = Vector2.Zero,
                 Material = CrewHudIcons.CrewPanel,
                 MatAlignment = MaterialAlignment.StretchToFit,
                 Color = Color.White,
@@ -272,6 +288,18 @@ namespace HireCrew
                     Visible = false,
                     ZOffset = 6,
                 };
+
+                var repairBtn = MakeBtn("Send", rowY, 0f);
+                repairBtn.FitToTextElement = false;
+                repairBtn.Size = new Vector2(RepairBtnW, RepairBtnH);
+                repairBtn.TextSize = new Vector2(RepairBtnW - 4f, RepairBtnH - 2f);
+                repairBtn.BaseColor = new Color(50, 95, 70, 255);
+                repairBtn.Color = repairBtn.BaseColor;
+                repairBtn.HighlightColor = new Color(80, 140, 100, 255);
+                repairBtn.ZOffset = 8;
+                repairBtn.Visible = false;
+                repairBtn.MouseInput.LeftReleased += (s, a) => OnRowRepairClicked(idx);
+                _rowRepairBtns[i] = repairBtn;
             }
 
             _btnAssign = MakeBtn("Assign", 0f, -155f, true);
@@ -291,16 +319,32 @@ namespace HireCrew
             _btnClose = MakeBtn("Close", 0f, 165f, true);
             _btnScrollUp = MakeBtn("^", 0f, 0f, false);
             _btnScrollDown = MakeBtn("v", 0f, 0f, false);
-            PlaceScrollBtn(_btnScrollUp, -36f);
-            PlaceScrollBtn(_btnScrollDown, -372f);
+            PlaceScrollBtn(_btnScrollUp, ScrollUpY);
+            PlaceScrollBtn(_btnScrollDown, ScrollDownY);
+            _scrollTrack = new TexturedBox(this)
+            {
+                ParentAlignment = ParentAlignments.Top | ParentAlignments.InnerH | ParentAlignments.InnerV,
+                Size = new Vector2(ScrollTrackW, 1f),
+                Color = new Color(28, 40, 52, 220),
+                ZOffset = 5,
+                Visible = false,
+            };
+            _scrollThumb = new TexturedBox(this)
+            {
+                ParentAlignment = ParentAlignments.Top | ParentAlignments.InnerH | ParentAlignments.InnerV,
+                Size = new Vector2(ScrollThumbW, ScrollThumbMinH),
+                Color = new Color(90, 150, 195, 255),
+                ZOffset = 6,
+                Visible = false,
+            };
 
             PlaceBottom(_btnAssign, -234f, 80f);
             PlaceBottom(_btnUnassign, -156f, 80f);
             PlaceBottom(_btnQuarters, -78f, 80f);
-            PlaceBottom(_btnTrain, 0f, 80f);
-            PlaceBottom(_btnDismiss, 78f, 80f);
-            PlaceBottom(_btnBulk, 156f, 80f);
-            PlaceBottom(_btnClose, 234f, 80f);
+            PlaceBottom(_btnTrain, 0f, 72f);
+            PlaceBottom(_btnDismiss, 78f, 72f);
+            PlaceBottom(_btnBulk, 156f, 72f);
+            PlaceBottom(_btnClose, 234f, 72f);
             PlaceBottom(_btnBulkAssign, -150f, 110f);
             PlaceBottom(_btnClearBulk, 0f, 98f);
             PlaceBottom(_btnBulkSeat, -200f, 98f);
@@ -335,9 +379,9 @@ namespace HireCrew
         {
             var accent = new Color(55, 105, 140, 255);
             btn.ParentAlignment = ParentAlignments.Top | ParentAlignments.InnerH | ParentAlignments.InnerV;
-            btn.Offset = new Vector2(PanelW * 0.5f - 20f, y);
+            btn.Offset = new Vector2(ScrollArrowX, y);
             btn.FitToTextElement = true;
-            btn.Size = new Vector2(32f, 26f);
+            btn.Size = new Vector2(32f, ScrollBtnH);
             btn.TextSize = new Vector2(24f, 20f);
             btn.BaseColor = accent;
             btn.Color = accent;
@@ -743,7 +787,9 @@ namespace HireCrew
             {
                 _header.Text = "Quarters";
                 FillQuartersSlots(session);
-                _status.Text = ScrollStatus("+10% range per amenity");
+                var quartersCrewRec = FindSelectedCrew(session);
+                _status.Text = ScrollStatus(AmenityBonusHint(
+                    quartersCrewRec != null ? quartersCrewRec.Role : CrewRole.Gunner));
             }
             else if (quartersPick)
             {
@@ -777,6 +823,7 @@ namespace HireCrew
             _btnScrollUp.Visible = canScroll;
             _btnScrollDown.Visible = canScroll;
             _scrollHint.Visible = canScroll;
+            UpdateScrollSlider(canScroll, visible);
 
             if (!canScroll)
             {
@@ -798,6 +845,67 @@ namespace HireCrew
                 _scrollHint.Text = "Scrollable list · mouse wheel or ^ / v";
         }
 
+        private void UpdateScrollSlider(bool canScroll, int visibleRows)
+        {
+            if (_scrollTrack == null || _scrollThumb == null)
+                return;
+
+            if (!canScroll)
+            {
+                _scrollTrack.Visible = false;
+                _scrollThumb.Visible = false;
+                return;
+            }
+
+            // Top|InnerV Offset is not a center Y — convert via parent-space centers so the
+            // track sits between the arrow buttons regardless of element height.
+            const float gap = 8f;
+            float upCenter = TopInnerCenterY(ScrollBtnH, ScrollUpY);
+            float downCenter = TopInnerCenterY(ScrollBtnH, ScrollDownY);
+            float trackTop = upCenter - ScrollBtnH * 0.5f - gap;
+            float trackBot = downCenter + ScrollBtnH * 0.5f + gap;
+            float trackH = trackTop - trackBot;
+            if (trackH < ScrollThumbMinH)
+                trackH = ScrollThumbMinH;
+
+            int total = _listTotalCount > 0 ? _listTotalCount : 1;
+            int visible = visibleRows > 0 ? visibleRows : MaxRows;
+            if (visible > total) visible = total;
+
+            float thumbH = trackH * ((float)visible / (float)total);
+            if (thumbH < ScrollThumbMinH) thumbH = ScrollThumbMinH;
+            if (thumbH > trackH) thumbH = trackH;
+
+            int maxOffset = total > visible ? total - visible : 0;
+            float frac = maxOffset > 0 ? (_model.ListScrollOffset / (float)maxOffset) : 0f;
+            if (frac < 0f) frac = 0f;
+            if (frac > 1f) frac = 1f;
+
+            float travel = trackH - thumbH;
+            float trackCenter = (trackTop + trackBot) * 0.5f;
+            float thumbCenter = trackTop - thumbH * 0.5f - frac * travel;
+
+            _scrollTrack.Size = new Vector2(ScrollTrackW, trackH);
+            _scrollTrack.Offset = new Vector2(ScrollArrowX, TopInnerOffsetY(trackH, trackCenter));
+            _scrollTrack.Visible = true;
+
+            _scrollThumb.Size = new Vector2(ScrollThumbW, thumbH);
+            _scrollThumb.Offset = new Vector2(ScrollArrowX, TopInnerOffsetY(thumbH, thumbCenter));
+            _scrollThumb.Visible = true;
+        }
+
+        /// <summary>Parent-space center Y for Top|InnerV + offsetY.</summary>
+        private static float TopInnerCenterY(float height, float offsetY)
+        {
+            return (PanelH - height) * 0.5f + offsetY;
+        }
+
+        /// <summary>Top|InnerV Offset.Y that places the element center at parent-space centerY.</summary>
+        private static float TopInnerOffsetY(float height, float centerY)
+        {
+            return centerY - (PanelH - height) * 0.5f;
+        }
+
         private void ClearRows()
         {
             _rowCount = 0;
@@ -811,6 +919,7 @@ namespace HireCrew
                 HideRoleIcon(i);
                 HideStarIcons(i);
                 HideColumnLabels(i);
+                HideRowRepairBtn(i);
             }
         }
 
@@ -846,6 +955,7 @@ namespace HireCrew
             HideRoleIcon(i);
             HideStarIcons(i);
             HideColumnLabels(i);
+            HideRowRepairBtn(i);
         }
 
         private void AddRow(string text, string crewId, long entityId, bool selected, bool interactive)
@@ -879,6 +989,7 @@ namespace HireCrew
             {
                 // text is unused — callers with role/stars should use AddCrewRow.
                 ApplyCrewColumns(i, text ?? "", CrewConfig.RoleLabel(role.Value), "", role.Value, stars.Value, false);
+                HideRowRepairBtn(i);
                 return;
             }
 
@@ -896,6 +1007,7 @@ namespace HireCrew
             HideRoleIcon(i);
             HideStarIcons(i);
             HideColumnLabels(i);
+            HideRowRepairBtn(i);
         }
 
         private void AddCrewRow(CrewRecord r, bool selected, bool interactive, bool homeLayout)
@@ -917,11 +1029,19 @@ namespace HireCrew
             string name = r.DisplayName ?? "";
             string detail = homeLayout ? FormatHomeDetail(r) : CrewHudModel.FormatRosterDetail(r);
             bool moraleSpace = homeLayout && r.Status == CrewStatus.Seated;
-            ApplyCrewColumns(i, name, CrewConfig.RoleLabel(r.Role), detail, r.Role, r.Stars, moraleSpace);
+            bool repairBtn = homeLayout
+                && r.Role == CrewRole.DamageControl
+                && r.Status == CrewStatus.Seated
+                && r.GridEntityId != 0;
+            ApplyCrewColumns(i, name, CrewConfig.RoleLabel(r.Role), detail, r.Role, r.Stars, moraleSpace, repairBtn);
             if (moraleSpace)
                 SetMoraleBar(i, r);
             else
                 HideMoraleBar(i);
+            if (repairBtn)
+                SetRowRepairBtn(i, r);
+            else
+                HideRowRepairBtn(i);
         }
 
         private static GlyphFormat SpecFormatFor(CrewRole role)
@@ -942,6 +1062,7 @@ namespace HireCrew
                 case CrewRole.Helmsman: return new Color(120, 220, 165);
                 case CrewRole.Propulsion: return new Color(255, 190, 90);
                 case CrewRole.Quartermaster: return new Color(210, 165, 255);
+                case CrewRole.DamageControl: return new Color(255, 220, 120);
                 default: return new Color(255, 214, 120);
             }
         }
@@ -963,13 +1084,22 @@ namespace HireCrew
             return rt;
         }
 
-        private void ApplyCrewColumns(int i, string name, string spec, string detail, CrewRole role, int stars, bool reserveMorale)
+        private void ApplyCrewColumns(
+            int i,
+            string name,
+            string spec,
+            string detail,
+            CrewRole role,
+            int stars,
+            bool reserveMorale,
+            bool reserveRepairBtn = false)
         {
             float rowWidth = PanelW - 28f;
             // Line 1: name + colored specialization. Line 2: status/detail.
             float leftReserve = IconLeftPad + RoleIconSize + IconGap;
             float starStripW = CrewHudIcons.StarRowWidth(StarIconSize, StarIconGap);
-            float rightPad = 12f + starStripW + 8f;
+            float repairReserve = reserveRepairBtn ? (RepairBtnW + 6f) : 0f;
+            float rightPad = 12f + starStripW + 8f + repairReserve;
             float textW = rowWidth - leftReserve - rightPad;
             if (textW < 120f) textW = 120f;
 
@@ -1030,6 +1160,71 @@ namespace HireCrew
                 detailLabel.Offset = new Vector2(detailCenterX, line2Y);
                 detailLabel.Visible = !string.IsNullOrEmpty(detail);
             }
+        }
+
+        private void HideRowRepairBtn(int i)
+        {
+            if (i < 0 || i >= MaxRows) return;
+            var btn = _rowRepairBtns[i];
+            if (btn != null)
+                btn.Visible = false;
+        }
+
+        private void SetRowRepairBtn(int i, CrewRecord crew)
+        {
+            if (i < 0 || i >= MaxRows || crew == null)
+                return;
+            var btn = _rowRepairBtns[i];
+            if (btn == null)
+                return;
+
+            bool onMission = CrewRepairMission.IsCrewOnMission(crew.CrewId);
+            bool canSend = !onMission;
+            if (canSend)
+            {
+                IMyEntity gEnt;
+                IMyCubeGrid g = null;
+                if (MyAPIGateway.Entities.TryGetEntityById(crew.GridEntityId, out gEnt))
+                    g = gEnt as IMyCubeGrid;
+                if (g == null || !CrewAmbientPresence.IsGridIdle(g))
+                    canSend = false;
+            }
+
+            float rowWidth = PanelW - 28f;
+            float starStripW = CrewHudIcons.StarRowWidth(StarIconSize, StarIconGap);
+            float starsLeft = (rowWidth * 0.5f) - 12f - starStripW;
+            float rowY = RowCenterY(i);
+            float line1Y = rowY - CardPadTop;
+            float btnCenterX = starsLeft - 4f - RepairBtnW * 0.5f;
+            float btnY = line1Y - (CardLineH - RepairBtnH) * 0.5f;
+
+            btn.Offset = new Vector2(btnCenterX, btnY);
+            btn.Size = new Vector2(RepairBtnW, RepairBtnH);
+            btn.TextSize = new Vector2(RepairBtnW - 4f, RepairBtnH - 2f);
+            btn.SetTextIfChanged(onMission ? "Recall" : "Send");
+            btn.Visible = true;
+            SetHomeAction(btn, onMission || canSend, onMission ? ActionDismiss : ActionAssign);
+        }
+
+        private void OnRowRepairClicked(int index)
+        {
+            if (index < 0 || index >= _rowCount)
+                return;
+            var btn = _rowRepairBtns[index];
+            if (btn == null || !btn.Visible)
+                return;
+            string crewId = _rowCrewIds[index];
+            if (string.IsNullOrEmpty(crewId))
+                return;
+            var session = CrewSession.Instance;
+            if (session == null || session.Store == null)
+                return;
+            var crew = session.Store.Get(crewId);
+            if (crew == null || crew.Role != CrewRole.DamageControl)
+                return;
+            bool recall = CrewRepairMission.IsCrewOnMission(crew.CrewId);
+            session.ClientRequestRepairDispatch(crew.CrewId, recall);
+            Refresh();
         }
 
         private sealed class OffshipHomeRow
@@ -1314,7 +1509,8 @@ namespace HireCrew
             long cost = CrewConfig.GetTrainCost(crew.Stars, discount);
             int minutes = CrewConfig.GetTrainMinutes(crew.Stars);
             _status.Text = "Unassigns crew for the duration · no refunds";
-            string costLine = crew.Stars + " → " + next + "  ·  " + cost + " cr";
+            // ASCII arrow: SE fonts often render Unicode arrows as '?'.
+            string costLine = crew.Stars + " -> " + next + "  ·  " + cost + " cr";
             if (discount > 0.001f)
                 costLine += " (QM -" + ((int)System.Math.Round(discount * 100f)) + "%)";
             costLine += "  ·  " + minutes + "m";
@@ -1469,7 +1665,7 @@ namespace HireCrew
             if (CrewConfig.IsTraining(r))
                 return CrewHudModel.FormatRosterDetail(r);
             if (r.Status != CrewStatus.Seated || r.GridEntityId == 0)
-                return "Pool";
+                return "Unassigned";
 
             bool local = IsOnLocalConstruct(r.GridEntityId);
             if (r.Role == CrewRole.Engineer)
@@ -1515,7 +1711,7 @@ namespace HireCrew
 
         private static string ResolveGridLabel(long gridEntityId)
         {
-            if (gridEntityId == 0) return "Pool";
+            if (gridEntityId == 0) return "Unassigned";
             IMyEntity ent;
             if (!MyAPIGateway.Entities.TryGetEntityById(gridEntityId, out ent) || ent == null)
                 return "Grid";
@@ -1530,9 +1726,30 @@ namespace HireCrew
             IMyEntity ent;
             if (!MyAPIGateway.Entities.TryGetEntityById(entityId.Value, out ent) || ent == null)
                 return "#" + entityId.Value;
-            var block = ent as IMyTerminalBlock;
-            if (block == null) return "#" + entityId.Value;
-            return BlockLabel(block);
+            // Showers (Decorative Pack) are plain CubeBlocks, not terminal blocks.
+            var cube = ent as IMyCubeBlock;
+            if (cube != null)
+                return BlockLabel(cube);
+            return "#" + entityId.Value;
+        }
+
+        private static string AmenityBonusHint(CrewRole role)
+        {
+            switch (role)
+            {
+                case CrewRole.Engineer:
+                    return "+10% power per amenity";
+                case CrewRole.Helmsman:
+                    return "+10% gyro per amenity";
+                case CrewRole.Propulsion:
+                    return "+10% thrust per amenity";
+                case CrewRole.Quartermaster:
+                    return "+10% train discount per amenity";
+                case CrewRole.DamageControl:
+                    return "EVA weld / project — Send from HUD";
+                default:
+                    return "+10% range per amenity";
+            }
         }
 
         private void FillUnassignPick(CrewSession session)
@@ -1551,7 +1768,7 @@ namespace HireCrew
                 ? CrewConfig.RoleLabel(crew.Role)
                 : crew.DisplayName;
             _header.Text = "Unassign " + name + "?";
-            _status.Text = "Return to pool · clears seat/weapon/amenities";
+            _status.Text = "Return to unassigned · clears seat/weapon/amenities";
             AddRow(CrewHudModel.FormatRosterDetail(crew), null, 0L, false, false);
         }
 

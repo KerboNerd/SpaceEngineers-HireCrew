@@ -1,0 +1,67 @@
+<?xml version="1.0"?>
+<Definitions xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <CubeBlocks>
+    <!-- FunctionalBlockDefinition required when ScreenAreas are present (MultiTextPanelComponent). -->
+    <Definition xsi:type="MyObjectBuilder_FunctionalBlockDefinition">
+      <Id>
+        <TypeId>TerminalBlock</TypeId>
+        <SubtypeId>HC_CrewStation_1</SubtypeId>
+      </Id>
+      <DisplayName>Crew Station</DisplayName>
+      <Description>Dedicated HireCrew station. Assign crew here to show the seated character.</Description>
+      <Icon>Textures\Icons\HC_CrewStation_1.dds</Icon>
+      <CubeSize>Large</CubeSize>
+      <BlockTopology>TriangleMesh</BlockTopology>
+      <Size x="1" y="1" z="1" />
+      <ModelOffset x="0" y="0" z="0" />
+      <Model>Models\Cubes\large\HC_CrewStation_1.mwm</Model>
+      <UsesDeformation>false</UsesDeformation>
+      <Components>
+        <Component Subtype="InteriorPlate" Count="10" />
+        <Component Subtype="Construction" Count="20" />
+        <Component Subtype="Computer" Count="5" />
+        <Component Subtype="Display" Count="2" />
+        <Component Subtype="InteriorPlate" Count="10" />
+      </Components>
+      <CriticalComponent Subtype="Computer" Index="0" />
+      <MountPoints>
+        <MountPoint Side="Bottom" StartX="0.00" StartY="0.00" EndX="1.00" EndY="1.00" Default="true" />
+      </MountPoints>
+      <ScreenAreas>
+        <ScreenArea Name="CockpitScreen_01" DisplayName="DisplayName_Screen_TopCenter" TextureResolution="256" ScreenWidth="5" ScreenHeight="3" Script="TSS_ArtificialHorizon" />
+        <ScreenArea Name="CockpitScreen_02" DisplayName="DisplayName_Screen_TopLeft" TextureResolution="256" ScreenWidth="4" ScreenHeight="3" Script="TSS_EnergyHydrogen" />
+        <ScreenArea Name="CockpitScreen_03" DisplayName="DisplayName_Screen_TopRight" TextureResolution="256" ScreenWidth="4" ScreenHeight="3" Script="TSS_Gravity" />
+        <ScreenArea Name="CockpitScreen_04" DisplayName="DisplayName_Screen_Small" TextureResolution="256" ScreenWidth="4" ScreenHeight="3" Script="TSS_Velocity" />
+        <ScreenArea Name="CockpitScreen_05" DisplayName="DisplayName_Screen_BottomRight" TextureResolution="256" ScreenWidth="4" ScreenHeight="3" Script="TSS_ClockAnalog" />
+      </ScreenAreas>
+      <BuildProgressModels>
+        <Model BuildPercentUpperBound="0.33" File="Models\Cubes\large\HC_CrewStation_1_BS1.mwm" />
+        <Model BuildPercentUpperBound="0.67" File="Models\Cubes\large\HC_CrewStation_1_BS2.mwm" />
+        <Model BuildPercentUpperBound="1.00" File="Models\Cubes\large\HC_CrewStation_1_BS3.mwm" />
+      </BuildProgressModels>
+      <VoxelPlacement>
+        <StaticMode>
+          <PlacementMode>OutsideVoxel</PlacementMode>
+          <MaxAllowed>0.2</MaxAllowed>
+          <MinAllowed>0</MinAllowed>
+        </StaticMode>
+        <DynamicMode>
+          <PlacementMode>OutsideVoxel</PlacementMode>
+          <MaxAllowed>0.2</MaxAllowed>
+          <MinAllowed>0</MinAllowed>
+        </DynamicMode>
+      </VoxelPlacement>
+      <BlockPairName>HC_CrewStation_1</BlockPairName>
+      <MirroringZ>Y</MirroringZ>
+      <MirroringY>Z</MirroringY>
+      <EdgeType>Light</EdgeType>
+      <BuildTimeSeconds>20</BuildTimeSeconds>
+      <DamageEffectName>Damage_Electrical_Damaged</DamageEffectName>
+      <DamagedSound>ParticleElectrical</DamagedSound>
+      <DestroyEffect>BlockDestroyed_Medium</DestroyEffect>
+      <DestroySound>PoofExplosionCat2</DestroySound>
+      <PCU>15</PCU>
+      <IsAirTight>false</IsAirTight>
+    </Definition>
+  </CubeBlocks>
+</Definitions>

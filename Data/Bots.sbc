@@ -1,14 +1,13 @@
 <?xml version="1.0"?>
 <Definitions xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
   <Bots>
-    <!-- Killable HireCrew gunner: clone of vanilla Astronaut with Invulnerable off for integrity/kill path. -->
+    <!-- Clone of vanilla Astronaut with survival enabled for HireCrew ambient spawns. -->
     <Bot xsi:type="MyObjectBuilder_HumanoidBotDefinition">
       <Id>
         <TypeId>MyObjectBuilder_HumanoidBot</TypeId>
-        <SubtypeId>HireCrew_Gunner</SubtypeId>
+        <SubtypeId>HireCrew_Crew</SubtypeId>
       </Id>
-      <DisplayName>HireCrew Gunner</DisplayName>
-      <Icon>Textures\GUI\Icons\SpawnDeer.dds</Icon>
+      <DisplayName>HireCrew Crew</DisplayName>
       <BotModel>NPC_Astronaut</BotModel>
       <BotBehaviorTree Subtype="AstronautBehavior" />
       <BehaviorType>Astronaut</BehaviorType>
@@ -29,13 +28,13 @@
       <AgentRadius>0.4</AgentRadius>
       <AgentMaxClimb>0.45</AgentMaxClimb>
       <AgentMaxSlope>66</AgentMaxSlope>
-      <PathArrivalRadius>0.05</PathArrivalRadius>
+      <PathArrivalRadius>0.8</PathArrivalRadius>
       <CanOpenDoors>true</CanOpenDoors>
       <UseFactionColor>true</UseFactionColor>
       <JoinSpawnerFaction>true</JoinSpawnerFaction>
       <DisableBroadcasting>true</DisableBroadcasting>
-      <Invulnerable>false</Invulnerable>
-      <IgnoredByAITargeting>false</IgnoredByAITargeting>
+      <Invulnerable>true</Invulnerable>
+      <IgnoredByAITargeting>true</IgnoredByAITargeting>
       <DoorOpenDistance>2.5</DoorOpenDistance>
       <SteeringBehaviors>
         <SteeringBehavior xsi:type="MyObjectBuilder_BotCharacterAvoidanceSteering">

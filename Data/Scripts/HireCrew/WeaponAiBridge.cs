@@ -1,40 +1,76 @@
 using System;
-using CoreSystems.Api;
+using System.Collections.Generic;
 using Sandbox.ModAPI;
 using Sandbox.ModAPI.Interfaces;
 using VRage.Game.Entity;
-using VRage.ModAPI;
 
 namespace HireCrew
 {
+    /// <summary>
+    /// Minimal WeaponCore/CoreSystems consumer API (whitelist-safe).
+    /// Binds only HasCoreWeapon + SetBlockTrackingRange; AI on/off uses WC_ControlModes terminal property.
+    /// </summary>
     public sealed class WeaponAiBridge
     {
-        private readonly WcApi _api = new WcApi();
-        private bool _ready;
+        private const long WcApiChannel = 67549756549L;
 
-        public bool IsReady { get { return _ready && _api.IsReady; } }
+        private bool _handlerRegistered;
+        private bool _ready;
+        private Func<MyEntity, bool> _hasCoreWeapon;
+        private Action<MyEntity, float> _setBlockTrackingRange;
+
+        public bool IsReady { get { return _ready; } }
 
         public void Load()
         {
-            _api.Load(OnReady, true);
+            if (_handlerRegistered) return;
+            MyAPIGateway.Utilities.RegisterMessageHandler(WcApiChannel, OnWcApiMessage);
+            _handlerRegistered = true;
+            MyAPIGateway.Utilities.SendModMessage(WcApiChannel, "ApiEndpointRequest");
         }
 
         public void Unload()
         {
-            _api.Unload();
+            if (!_handlerRegistered) return;
+            MyAPIGateway.Utilities.UnregisterMessageHandler(WcApiChannel, OnWcApiMessage);
+            _handlerRegistered = false;
             _ready = false;
+            _hasCoreWeapon = null;
+            _setBlockTrackingRange = null;
         }
 
-        private void OnReady()
+        private void OnWcApiMessage(object obj)
         {
+            if (_ready || obj is string) return;
+
+            var dict = obj as IReadOnlyDictionary<string, Delegate>;
+            if (dict == null)
+            {
+                var mutable = obj as Dictionary<string, Delegate>;
+                if (mutable == null) return;
+                dict = mutable;
+            }
+
+            Delegate hasDel;
+            Delegate rangeDel;
+            if (!dict.TryGetValue("HasCoreWeaponBase", out hasDel))
+                return;
+            if (!dict.TryGetValue("SetBlockTrackingRangeBase", out rangeDel))
+                return;
+
+            _hasCoreWeapon = hasDel as Func<MyEntity, bool>;
+            _setBlockTrackingRange = rangeDel as Action<MyEntity, float>;
+            if (_hasCoreWeapon == null || _setBlockTrackingRange == null)
+                return;
+
             _ready = true;
             MyAPIGateway.Utilities.ShowMessage("HireCrew", "WcApi ready");
         }
 
         public bool IsCoreWeapon(IMyTerminalBlock block)
         {
-            if (block == null || !IsReady) return false;
-            return _api.HasCoreWeapon((MyEntity)block);
+            if (block == null || !_ready || _hasCoreWeapon == null) return false;
+            return _hasCoreWeapon((MyEntity)block);
         }
 
         public void ForceAiOff(IMyTerminalBlock weapon)
@@ -42,7 +78,7 @@ namespace HireCrew
             SetControlMode(weapon, manual: true);
         }
 
-        public void SetManned(IMyTerminalBlock weapon, bool manned, CrewTier tier)
+        public void SetManned(IMyTerminalBlock weapon, bool manned, int stars, float efficiencyMultiplier = 1f)
         {
             if (weapon == null) return;
 
@@ -53,13 +89,13 @@ namespace HireCrew
             }
 
             SetControlMode(weapon, manual: false);
-            if (IsReady)
-                _api.SetBlockTrackingRange((MyEntity)weapon, CrewConfig.GetTrackingRange(tier));
+            if (_ready && _setBlockTrackingRange != null)
+                _setBlockTrackingRange((MyEntity)weapon, CrewConfig.GetTrackingRange(stars, efficiencyMultiplier));
         }
 
         private static void SetControlMode(IMyTerminalBlock weapon, bool manual)
         {
-            // WC terminal id is "WC_" + "ControlModes" => WC_ControlModes; Auto=0, Manual=1
+            // WC terminal id is "WC_" + "ControlModes"; Auto=0, Manual=1
             try
             {
                 var prop = weapon.GetProperty("WC_ControlModes") as ITerminalProperty<long>;
@@ -71,16 +107,14 @@ namespace HireCrew
             }
             catch (Exception)
             {
-                // fall through
             }
 
             try
             {
-                weapon.SetValueLong("WC_ControlModes", manual ? 1L : 0L);
+                weapon.SetValue("WC_ControlModes", manual ? 1L : 0L);
             }
             catch (Exception)
             {
-                // WC not ready on this block yet
             }
         }
     }

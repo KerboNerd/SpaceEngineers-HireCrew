@@ -255,5 +255,83 @@ namespace HireCrew.Logic.Tests
             Assert.False(m.BulkMode);
             Assert.Equal(0, m.BulkSelectedCrewIds.Count);
         }
+
+        [Fact]
+        public void Offship_focus_toggle_and_clear_selection()
+        {
+            var m = new CrewHudModel();
+            m.Open(0);
+            Assert.False(m.HasManagedGrid);
+            Assert.False(m.HasFocusedGrid);
+            m.SelectedCrewId = "keep-until-change";
+            m.ToggleFocusedGrid(100);
+            Assert.Equal(100, m.FocusedGridId);
+            Assert.True(m.HasFocusedGrid);
+            Assert.Null(m.SelectedCrewId);
+            m.SelectedCrewId = "a";
+            m.ToggleFocusedGrid(100);
+            Assert.Equal(0, m.FocusedGridId);
+            Assert.Null(m.SelectedCrewId);
+            m.ToggleFocusedGrid(200);
+            Assert.Equal(200, m.FocusedGridId);
+            m.Close();
+            Assert.Equal(0, m.FocusedGridId);
+        }
+
+        [Fact]
+        public void CollectCrewedGridIds_unique_seated_only()
+        {
+            var roster = new List<CrewRecord>
+            {
+                new CrewRecord { CrewId = "u", Status = CrewStatus.Unassigned, GridEntityId = 0 },
+                new CrewRecord { CrewId = "a", Status = CrewStatus.Seated, GridEntityId = 10 },
+                new CrewRecord { CrewId = "b", Status = CrewStatus.Seated, GridEntityId = 20 },
+                new CrewRecord { CrewId = "c", Status = CrewStatus.Seated, GridEntityId = 10 },
+                new CrewRecord { CrewId = "d", Status = CrewStatus.Seated, GridEntityId = 0 },
+            };
+            var ids = CrewHudModel.CollectCrewedGridIds(roster);
+            Assert.Equal(new long[] { 10, 20 }, ids.ToArray());
+        }
+
+        [Fact]
+        public void TryBeginUnassign_allows_focused_offship()
+        {
+            var m = new CrewHudModel();
+            m.Open(0);
+            var seated = new CrewRecord { CrewId = "s", Status = CrewStatus.Seated, GridEntityId = 55 };
+            Assert.False(m.TryBeginUnassignFromHome(seated));
+            m.ToggleFocusedGrid(55);
+            Assert.True(m.CanUnassignWithFocus(seated));
+            Assert.True(m.TryBeginUnassignFromHome(seated));
+            Assert.Equal(CrewHudScreen.UnassignPick, m.Screen);
+            Assert.Equal("s", m.SelectedCrewId);
+        }
+
+        [Fact]
+        public void TryBeginUnassign_rejects_wrong_focus_grid()
+        {
+            var m = new CrewHudModel();
+            m.Open(0);
+            m.ToggleFocusedGrid(1);
+            var seated = new CrewRecord { CrewId = "s", Status = CrewStatus.Seated, GridEntityId = 2 };
+            Assert.False(m.CanUnassignWithFocus(seated));
+            Assert.False(m.TryBeginUnassignFromHome(seated));
+        }
+
+        [Fact]
+        public void IsFocusStillValid_false_when_no_seated_on_focus()
+        {
+            var m = new CrewHudModel();
+            m.Open(0);
+            m.ToggleFocusedGrid(9);
+            var roster = new List<CrewRecord>
+            {
+                new CrewRecord { CrewId = "u", Status = CrewStatus.Unassigned },
+                new CrewRecord { CrewId = "s", Status = CrewStatus.Seated, GridEntityId = 8 },
+            };
+            Assert.False(m.IsFocusStillValid(roster));
+            roster.Add(new CrewRecord { CrewId = "t", Status = CrewStatus.Seated, GridEntityId = 9 });
+            Assert.True(m.IsFocusStillValid(roster));
+        }
     }
 }

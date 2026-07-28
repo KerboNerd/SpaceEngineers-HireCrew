@@ -1,0 +1,17 @@
+# Workshop uploader staging / tooling
+workshop/content/
+workshop/steamcmd/
+workshop/preview.jpg
+
+# Build / test artifacts
+obj/
+bin/
+tests/**/bin/
+tests/**/obj/
+*.dll
+*.pdb
+
+# Local agent / OS junk
+.superpowers/
+Thumbs.db
+Desktop.ini

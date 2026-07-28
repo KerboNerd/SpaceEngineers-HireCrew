@@ -35,6 +35,8 @@ namespace HireCrew
         public bool IsOpen { get; private set; }
         public CrewHudScreen Screen { get; private set; }
         public long GridEntityId { get; private set; }
+        /// <summary>Off-seat grid focus for viewing/unassign; never used as local manage target.</summary>
+        public long FocusedGridId { get; private set; }
         public string SelectedCrewId { get; set; }
         public long SelectedSeatEntityId { get; set; }
         public long SelectedWeaponEntityId { get; set; }
@@ -51,13 +53,16 @@ namespace HireCrew
         public List<string> BulkSelectedCrewIds { get { return _bulkSelectedCrewIds; } }
         public List<BulkMapEntry> BulkMapEntries { get { return _bulkMapEntries; } }
 
-        /// <summary>True when opened from a managed seat; false for off-ship pool (train/dismiss only).</summary>
+        /// <summary>True when opened from a managed seat; false for off-ship (grid picker / pool).</summary>
         public bool HasManagedGrid { get { return GridEntityId != 0; } }
+
+        public bool HasFocusedGrid { get { return FocusedGridId != 0; } }
 
         public void Open(long gridEntityId)
         {
             IsOpen = true;
             GridEntityId = gridEntityId;
+            FocusedGridId = 0;
             Screen = CrewHudScreen.Home;
             ListScrollOffset = 0;
             ClearBulkState();
@@ -67,8 +72,65 @@ namespace HireCrew
         {
             IsOpen = false;
             Screen = CrewHudScreen.Home;
+            FocusedGridId = 0;
             ListScrollOffset = 0;
             ClearBulkState();
+        }
+
+        public void ClearFocusedGrid()
+        {
+            if (FocusedGridId == 0) return;
+            FocusedGridId = 0;
+            SelectedCrewId = null;
+        }
+
+        public void ToggleFocusedGrid(long gridEntityId)
+        {
+            if (gridEntityId == 0) return;
+            long next = FocusedGridId == gridEntityId ? 0L : gridEntityId;
+            if (next == FocusedGridId) return;
+            FocusedGridId = next;
+            SelectedCrewId = null;
+        }
+
+        public static List<long> CollectCrewedGridIds(IList<CrewRecord> roster)
+        {
+            var ids = new List<long>();
+            if (roster == null) return ids;
+            for (int i = 0; i < roster.Count; i++)
+            {
+                var r = roster[i];
+                if (r == null || r.Status != CrewStatus.Seated || r.GridEntityId == 0) continue;
+                bool seen = false;
+                for (int j = 0; j < ids.Count; j++)
+                {
+                    if (ids[j] == r.GridEntityId)
+                    {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen) ids.Add(r.GridEntityId);
+            }
+            return ids;
+        }
+
+        public bool IsFocusStillValid(IList<CrewRecord> roster)
+        {
+            if (FocusedGridId == 0) return true;
+            if (roster == null) return false;
+            for (int i = 0; i < roster.Count; i++)
+            {
+                var r = roster[i];
+                if (r != null && r.Status == CrewStatus.Seated && r.GridEntityId == FocusedGridId)
+                    return true;
+            }
+            return false;
+        }
+
+        public bool CanUnassignWithFocus(CrewRecord r)
+        {
+            return CanUnassignHome(r) && HasFocusedGrid && r != null && r.GridEntityId == FocusedGridId;
         }
 
         public void Toggle(long gridEntityId)
@@ -416,7 +478,8 @@ namespace HireCrew
 
         public bool TryBeginUnassignFromHome(CrewRecord selected)
         {
-            if (!HasManagedGrid || !CanUnassignHome(selected)) return false;
+            bool ok = (HasManagedGrid && CanUnassignHome(selected)) || CanUnassignWithFocus(selected);
+            if (!ok) return false;
             SelectedCrewId = selected.CrewId;
             Screen = CrewHudScreen.UnassignPick;
             ListScrollOffset = 0;
@@ -636,7 +699,7 @@ namespace HireCrew
             if (CrewConfig.IsTraining(r))
                 return "Training \u2014 " + FormatTrainRemaining(r.TrainingEndsUtcTicks, utcNowTicks);
             if (r.Status != CrewStatus.Seated || r.GridEntityId == 0)
-                return "Pool";
+                return "Unassigned";
 
             var marks = CrewAmenities.FormatAmenityMarks(r);
             var eff = CrewAmenities.GetEfficiencyPercent(r);

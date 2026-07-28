@@ -15,7 +15,15 @@ namespace HireCrew
         Engineer = 1,
         Helmsman = 2,
         Propulsion = 3,
-        Quartermaster = 4
+        Quartermaster = 4,
+        DamageControl = 5
+    }
+
+    public enum StarBias
+    {
+        Low = 0,
+        Balanced = 1,
+        High = 2
     }
 
     [ProtoContract]
@@ -70,6 +78,13 @@ namespace HireCrew
         [ProtoMember(5)] public List<HireCandidate> Candidates = new List<HireCandidate>();
         /// <summary>Price multiplier percent (25–500, 100 = 1.00x).</summary>
         [ProtoMember(6)] public int PriceMultiplierPercent = CrewConfig.DefaultPriceMultiplierPercent;
+        [ProtoMember(7)] public int MinCandidates;
+        [ProtoMember(8)] public int MaxCandidates;
+        /// <summary>Bitmask of CrewRole; 0 = unset (resolve to world mask).</summary>
+        [ProtoMember(9)] public int AllowedRoles;
+        /// <summary>StarBias ordinal.</summary>
+        [ProtoMember(10)] public int StarBias;
+        [ProtoMember(11)] public bool RefillOnHire;
     }
 
     [ProtoContract]
@@ -106,6 +121,12 @@ namespace HireCrew
         [ProtoMember(2)] public int RefreshMinutes;
         /// <summary>Price multiplier percent (25–500). Always sent with refresh settings.</summary>
         [ProtoMember(3)] public int PriceMultiplierPercent;
+        [ProtoMember(4)] public int MinCandidates;
+        [ProtoMember(5)] public int MaxCandidates;
+        [ProtoMember(6)] public int AllowedRoles;
+        [ProtoMember(7)] public int StarBias;
+        [ProtoMember(8)] public bool RefillOnHire;
+        [ProtoMember(9)] public bool ForceReroll;
     }
 
     [ProtoContract]
@@ -181,5 +202,51 @@ namespace HireCrew
     public sealed class NotifyMessage
     {
         [ProtoMember(1)] public string Text;
+    }
+
+    [ProtoContract]
+    public sealed class AdminCommandRequest
+    {
+        [ProtoMember(1)] public string Verb;
+        [ProtoMember(2)] public List<string> Args = new List<string>();
+    }
+
+    [ProtoContract]
+    public sealed class RepairWaypoint
+    {
+        [ProtoMember(1)] public long BlockEntityId;
+        /// <summary>Position in grid local space (fallback if block id is gone).</summary>
+        [ProtoMember(2)] public double LocalX;
+        [ProtoMember(3)] public double LocalY;
+        [ProtoMember(4)] public double LocalZ;
+    }
+
+    [ProtoContract]
+    public sealed class RepairGridPath
+    {
+        [ProtoMember(1)] public long GridEntityId;
+        [ProtoMember(2)] public List<RepairWaypoint> Waypoints = new List<RepairWaypoint>();
+        /// <summary>True when player finished path; last waypoint is the Exit.</summary>
+        [ProtoMember(3)] public bool HasExit;
+    }
+
+    [ProtoContract]
+    public sealed class PathEditRequest
+    {
+        [ProtoMember(1)] public long GridEntityId;
+        /// <summary>0=Append, 1=Undo, 2=FinishExit, 3=Clear</summary>
+        [ProtoMember(2)] public int Op;
+        [ProtoMember(3)] public long BlockEntityId;
+        [ProtoMember(4)] public double LocalX;
+        [ProtoMember(5)] public double LocalY;
+        [ProtoMember(6)] public double LocalZ;
+    }
+
+    [ProtoContract]
+    public sealed class RepairDispatchRequest
+    {
+        [ProtoMember(1)] public string CrewId;
+        /// <summary>false = Send this crew, true = Recall this crew.</summary>
+        [ProtoMember(2)] public bool Recall;
     }
 }

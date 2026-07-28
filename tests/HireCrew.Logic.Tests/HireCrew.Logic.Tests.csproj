@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net48</TargetFramework>
     <IsPackable>false</IsPackable>
@@ -11,7 +11,13 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
     <Compile Include="..\..\Data\Scripts\HireCrew\CrewModels.cs" Link="CrewModels.cs" />
     <Compile Include="..\..\Data\Scripts\HireCrew\CrewConfig.cs" Link="CrewConfig.cs" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\HireWorldConfig.cs" Link="HireWorldConfig.cs" />
     <Compile Include="..\..\Data\Scripts\HireCrew\CrewValidation.cs" Link="CrewValidation.cs" />
     <Compile Include="..\..\Data\Scripts\HireCrew\CrewStore.cs" Link="CrewStore.cs" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\CrewNames.cs" Link="CrewNames.cs" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\CrewHirePool.cs" Link="CrewHirePool.cs" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\CrewAmenities.cs" Link="CrewAmenities.cs" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\CrewOwnership.cs" Link="CrewOwnership.cs" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\CrewHudModel.cs" Link="CrewHudModel.cs" />
   </ItemGroup>
 </Project>

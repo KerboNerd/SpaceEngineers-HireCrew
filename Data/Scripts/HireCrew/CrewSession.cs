@@ -15,6 +15,7 @@ namespace HireCrew
         public WeaponAiBridge WeaponAi { get; private set; }
         public CrewStore Store { get; private set; }
         public HirePoolStore HirePools { get; private set; }
+        public RepairPathStore RepairPaths { get; private set; }
         public CrewPowerBuff PowerBuff { get; private set; }
 
         // Same instance required for UnregisterSecureMessageHandler.
@@ -31,6 +32,7 @@ namespace HireCrew
             Instance = this;
             Store = new CrewStore();
             HirePools = new HirePoolStore();
+            RepairPaths = new RepairPathStore();
             PowerBuff = new CrewPowerBuff();
             WeaponAi = new WeaponAiBridge();
             WeaponAi.Load();
@@ -41,11 +43,14 @@ namespace HireCrew
             _blockInfo = new CrewBlockInfo();
             _blockInfo.Init();
             CrewHireBlockLogic.EnsureTerminalControls();
+            CrewCockpitControls.EnsureTerminalControls();
         }
 
         public override void SaveData()
         {
             if (!MyAPIGateway.Multiplayer.IsServer || Store == null) return;
+            // Ambient bots must not serialize into the sandbox save (causes duplicates on reload).
+            CrewAmbientPresence.DespawnAllForSave(this);
             var bytes = Store.ToBytes() ?? new byte[0];
             var b64 = Convert.ToBase64String(bytes);
             // Dual-write: world variable + WorldStorage file (dedicated save/load resilience).
@@ -71,6 +76,18 @@ namespace HireCrew
                 }
                 catch { }
             }
+
+            if (RepairPaths != null)
+            {
+                var pathB64 = Convert.ToBase64String(RepairPaths.ToBytes() ?? new byte[0]);
+                MyAPIGateway.Utilities.SetVariable("HireCrew_RepairPaths", pathB64);
+                try
+                {
+                    using (var writer = MyAPIGateway.Utilities.WriteFileInWorldStorage("HireCrewRepairPaths.dat", typeof(CrewSession)))
+                        writer.Write(pathB64);
+                }
+                catch { }
+            }
         }
 
         public override void BeforeStart()
@@ -78,6 +95,10 @@ namespace HireCrew
             // Utilities/chat are reliable here; LoadData can be too early on some clients.
             if (_hud != null)
                 _hud.EnsureChatRegistered();
+            CrewCockpitControls.EnsureTerminalControls();
+
+            // Clients use the same clamps for terminal UI; server remains authoritative on apply.
+            LoadHireWorldConfig();
 
             if (!MyAPIGateway.Multiplayer.IsServer) return;
             byte[] payload = TryLoadStoreBytes();
@@ -92,7 +113,15 @@ namespace HireCrew
                 try { HirePools = HirePoolStore.FromBytes(poolPayload); }
                 catch { HirePools = new HirePoolStore(); }
             }
+            byte[] pathPayload = TryLoadRepairPathBytes();
+            if (pathPayload != null)
+            {
+                try { RepairPaths = RepairPathStore.FromBytes(pathPayload); }
+                catch { RepairPaths = new RepairPathStore(); }
+            }
             RestoreAssignmentsFromStore();
+            // Worlds saved before DespawnAllForSave may still contain leftover ambient bodies.
+            CrewAmbientPresence.PurgeOrphanAmbientCharacters();
             if (_blockInfo != null)
                 _blockInfo.RefreshAssigned();
             CrewStationLogic.RefreshAll();
@@ -154,6 +183,32 @@ namespace HireCrew
             return null;
         }
 
+        private static byte[] TryLoadRepairPathBytes()
+        {
+            string varB64;
+            if (MyAPIGateway.Utilities.GetVariable("HireCrew_RepairPaths", out varB64) && !string.IsNullOrEmpty(varB64))
+            {
+                try { return Convert.FromBase64String(varB64); }
+                catch { }
+            }
+
+            try
+            {
+                if (MyAPIGateway.Utilities.FileExistsInWorldStorage("HireCrewRepairPaths.dat", typeof(CrewSession)))
+                {
+                    using (var reader = MyAPIGateway.Utilities.ReadFileInWorldStorage("HireCrewRepairPaths.dat", typeof(CrewSession)))
+                    {
+                        var b64 = reader.ReadToEnd();
+                        if (!string.IsNullOrEmpty(b64))
+                            return Convert.FromBase64String(b64);
+                    }
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
         protected override void UnloadData()
         {
             if (_hud != null)
@@ -161,6 +216,7 @@ namespace HireCrew
                 _hud.Unload();
                 _hud = null;
             }
+            CrewCockpitControls.Unload();
             if (_blockInfo != null)
             {
                 _blockInfo.Unload();
@@ -171,30 +227,107 @@ namespace HireCrew
                 CrewNetworking.Unregister(_messageHandler);
                 _messageHandler = null;
             }
+            if (MyAPIGateway.Multiplayer != null && MyAPIGateway.Multiplayer.IsServer && Store != null)
+                CrewAmbientPresence.DespawnAll(this);
+            CrewAmbientPresence.ClearRuntime();
+            CrewRepairMission.ClearAll();
             if (WeaponAi != null) WeaponAi.Unload();
             WeaponAi = null;
             PowerBuff = null;
             Store = null;
             HirePools = null;
+            RepairPaths = null;
+            HireWorldConfig.ClearCurrent();
             if (Instance == this) Instance = null;
+        }
+
+        private void LoadHireWorldConfig()
+        {
+            try
+            {
+                if (MyAPIGateway.Utilities != null
+                    && MyAPIGateway.Utilities.FileExistsInWorldStorage(HireWorldConfig.FileName, typeof(CrewSession)))
+                {
+                    using (var reader = MyAPIGateway.Utilities.ReadFileInWorldStorage(
+                        HireWorldConfig.FileName, typeof(CrewSession)))
+                    {
+                        var text = reader.ReadToEnd();
+                        if (!string.IsNullOrEmpty(text))
+                        {
+                            // SE whitelist: use ModAPI XML helpers, not System.Xml.Serialization.
+                            var loaded = MyAPIGateway.Utilities.SerializeFromXML<HireWorldConfig>(text);
+                            if (loaded != null)
+                            {
+                                HireWorldConfig.SetCurrent(loaded);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                try
+                {
+                    MyAPIGateway.Utilities.ShowMessage("HireCrew", "HireCrewConfig.xml invalid — using defaults");
+                    VRage.Utils.MyLog.Default.WriteLine("HireCrew: HireCrewConfig.xml load failed: " + e.Message);
+                }
+                catch { }
+            }
+
+            var defaults = HireWorldConfig.CreateDefaults();
+            HireWorldConfig.SetCurrent(defaults);
+            if (MyAPIGateway.Multiplayer == null || !MyAPIGateway.Multiplayer.IsServer)
+                return;
+            try
+            {
+                var xml = MyAPIGateway.Utilities.SerializeToXML(defaults);
+                using (var writer = MyAPIGateway.Utilities.WriteFileInWorldStorage(
+                    HireWorldConfig.FileName, typeof(CrewSession)))
+                    writer.Write(xml);
+            }
+            catch (Exception e)
+            {
+                try
+                {
+                    VRage.Utils.MyLog.Default.WriteLine("HireCrew: HireCrewConfig.xml save failed: " + e.Message);
+                }
+                catch { }
+            }
         }
 
         public override void UpdateAfterSimulation()
         {
             if (_hud != null)
                 _hud.Update();
+            CrewPathPainter.Update(this);
 
             if (!MyAPIGateway.Multiplayer.IsServer || Store == null) return;
+            // Wander steering must run every frame; spawn/lifecycle stays ~1 Hz.
+            CrewAmbientPresence.UpdateMovement(this);
+            CrewRepairMission.UpdateMovement(this);
+            // Harvest dummy bot controllers often (AiEnabled pattern) so ambient NPCs can TakeControl.
+            if (_tick % 5 == 0)
+                CrewBotControllers.Tick();
             _tick++;
             if (_tick % 60 != 0) return;
             SyncRosterToNewPlayers();
             TickTrainingCompletions();
             WatchCrewIntegrity();
+            CrewAmbientPresence.Tick(this);
+            CrewRepairMission.Tick(this);
             RefreshAllGridBuffs();
             if (HirePools != null && HirePools.TickRefresh(DateTime.UtcNow, _hireRng))
             {
                 // Clients pull on open; no broadcast storm.
             }
+        }
+
+        /// <summary>Ambient presence changed CharacterEntityId; push roster so clients hide subparts.</summary>
+        public void NotifyAmbientRosterChanged(long gridEntityId)
+        {
+            if (!MyAPIGateway.Multiplayer.IsServer || Store == null) return;
+            BroadcastRoster(gridEntityId);
         }
 
         /// <summary>
@@ -296,6 +429,306 @@ namespace HireCrew
                 HandleTrain(CrewNetworking.Deserialize<TrainRequest>(data), identityId, sender);
             else if (id == CrewNetworking.CancelTrainMsg)
                 HandleCancelTrain(CrewNetworking.Deserialize<CancelTrainRequest>(data), identityId, sender);
+            else if (id == CrewNetworking.AdminCommandMsg)
+                HandleAdminCommand(CrewNetworking.Deserialize<AdminCommandRequest>(data), identityId, sender);
+            else if (id == CrewNetworking.PathEditMsg)
+                HandlePathEdit(CrewNetworking.Deserialize<PathEditRequest>(data), identityId, sender);
+            else if (id == CrewNetworking.RepairDispatchMsg)
+                HandleRepairDispatch(CrewNetworking.Deserialize<RepairDispatchRequest>(data), identityId, sender);
+        }
+
+        public void ClientRequestAdmin(AdminCommandRequest req)
+        {
+            if (req == null) return;
+            var data = CrewNetworking.Serialize(req);
+            if (MyAPIGateway.Multiplayer.IsServer)
+                HandleAdminCommand(req, MyAPIGateway.Session.Player.IdentityId, MyAPIGateway.Multiplayer.MyId);
+            else
+                CrewNetworking.SendToServer(CrewNetworking.AdminCommandMsg, data);
+        }
+
+        public void ClientRequestPathEdit(PathEditRequest req)
+        {
+            if (req == null) return;
+            var data = CrewNetworking.Serialize(req);
+            if (MyAPIGateway.Multiplayer.IsServer)
+                HandlePathEdit(req, MyAPIGateway.Session.Player.IdentityId, MyAPIGateway.Multiplayer.MyId);
+            else
+                CrewNetworking.SendToServer(CrewNetworking.PathEditMsg, data);
+        }
+
+        public void ClientRequestRepairDispatch(string crewId, bool recall)
+        {
+            if (string.IsNullOrEmpty(crewId))
+                return;
+            var req = new RepairDispatchRequest { CrewId = crewId, Recall = recall };
+            var data = CrewNetworking.Serialize(req);
+            if (MyAPIGateway.Multiplayer.IsServer)
+                HandleRepairDispatch(req, MyAPIGateway.Session.Player.IdentityId, MyAPIGateway.Multiplayer.MyId);
+            else
+                CrewNetworking.SendToServer(CrewNetworking.RepairDispatchMsg, data);
+        }
+
+        private void HandleRepairDispatch(RepairDispatchRequest req, long identityId, ulong steamId)
+        {
+            if (req == null || string.IsNullOrEmpty(req.CrewId) || Store == null)
+                return;
+
+            var crew = Store.Get(req.CrewId);
+            if (crew == null || crew.Role != CrewRole.DamageControl || crew.GridEntityId == 0)
+            {
+                Notify(steamId, "Construction: crew not ready");
+                return;
+            }
+
+            IMyCubeGrid grid;
+            if (!TryGetGrid(crew.GridEntityId, out grid) || grid == null)
+            {
+                Notify(steamId, "Construction: grid not found");
+                return;
+            }
+            if (!HasManagePermission(identityId, grid))
+            {
+                Notify(steamId, "No permission");
+                return;
+            }
+
+            if (req.Recall)
+            {
+                bool ok = CrewRepairMission.RecallCrew(crew.CrewId);
+                Notify(steamId, ok
+                    ? "Construction: recalling " + (crew.DisplayName ?? "welder")
+                    : "Construction: not out");
+                return;
+            }
+
+            if (!CrewAmbientPresence.IsGridIdle(grid))
+            {
+                Notify(steamId, "Construction: grid moving — wait");
+                return;
+            }
+
+            bool started = CrewRepairMission.DispatchCrew(this, crew.CrewId);
+            if (!started)
+                Notify(steamId, "Construction: nothing to repair / not ready");
+            else
+                Notify(steamId, "Construction: sent " + (crew.DisplayName ?? "welder"));
+        }
+
+        private void HandlePathEdit(PathEditRequest req, long identityId, ulong steamId)
+        {
+            if (req == null || RepairPaths == null) return;
+
+            IMyEntity gridEnt;
+            if (!MyAPIGateway.Entities.TryGetEntityById(req.GridEntityId, out gridEnt) || gridEnt == null)
+            {
+                Notify(steamId, "Path: grid missing");
+                return;
+            }
+
+            var grid = gridEnt as IMyCubeGrid;
+            if (grid == null)
+            {
+                Notify(steamId, "Path: not a grid");
+                return;
+            }
+
+            if (!HasManagePermission(identityId, grid))
+            {
+                Notify(steamId, "Path: no access");
+                return;
+            }
+
+            var path = RepairPaths.Get(req.GridEntityId)
+                ?? new RepairGridPath { GridEntityId = req.GridEntityId };
+            if (path.Waypoints == null)
+                path.Waypoints = new List<RepairWaypoint>();
+
+            switch (req.Op)
+            {
+                case 0: // Append
+                    if (path.HasExit)
+                    {
+                        Notify(steamId, "Path: already finished (Clear first)");
+                        return;
+                    }
+                    path.Waypoints.Add(new RepairWaypoint
+                    {
+                        BlockEntityId = req.BlockEntityId,
+                        LocalX = req.LocalX,
+                        LocalY = req.LocalY,
+                        LocalZ = req.LocalZ
+                    });
+                    RepairPaths.Upsert(path);
+                    Notify(steamId, "Path " + path.Waypoints.Count + " wp");
+                    break;
+
+                case 1: // Undo
+                    if (path.Waypoints.Count == 0)
+                    {
+                        Notify(steamId, "Path: empty");
+                        return;
+                    }
+                    path.Waypoints.RemoveAt(path.Waypoints.Count - 1);
+                    path.HasExit = false;
+                    if (path.Waypoints.Count == 0)
+                        RepairPaths.Clear(req.GridEntityId);
+                    else
+                        RepairPaths.Upsert(path);
+                    Notify(steamId, "Path undo → " + path.Waypoints.Count + " wp");
+                    break;
+
+                case 2: // FinishExit
+                    if (path.Waypoints.Count < 2)
+                    {
+                        Notify(steamId, "Path: need at least 2 waypoints");
+                        return;
+                    }
+                    path.HasExit = true;
+                    RepairPaths.Upsert(path);
+                    Notify(steamId, "Path saved (Exit)");
+                    break;
+
+                case 3: // Clear
+                    RepairPaths.Clear(req.GridEntityId);
+                    Notify(steamId, "Path cleared");
+                    break;
+
+                default:
+                    Notify(steamId, "Path: bad op");
+                    break;
+            }
+        }
+
+        private void HandleAdminCommand(AdminCommandRequest req, long identityId, ulong steamId)
+        {
+            CrewAdminCommands.Handle(this, req, identityId, steamId);
+        }
+
+        public void AdminNotify(ulong steamId, string message)
+        {
+            Notify(steamId, message);
+        }
+
+        public void AdminNotifyLines(ulong steamId, IList<string> lines)
+        {
+            if (lines == null) return;
+            for (int i = 0; i < lines.Count; i++)
+                Notify(steamId, lines[i]);
+        }
+
+        /// <summary>
+        /// Notify crew owner identity and, when owned by a faction, all online faction members.
+        /// Same delivery path as construction "out of components" alerts.
+        /// </summary>
+        public void NotifyCrewOwners(CrewRecord crew, string text)
+        {
+            if (crew == null || string.IsNullOrEmpty(text))
+                return;
+            try
+            {
+                var players = new List<IMyPlayer>();
+                MyAPIGateway.Players.GetPlayers(players);
+                var notified = new HashSet<ulong>();
+
+                if (crew.OwnerIsFaction && crew.OwnerKey != 0
+                    && MyAPIGateway.Session != null && MyAPIGateway.Session.Factions != null)
+                {
+                    var faction = MyAPIGateway.Session.Factions.TryGetFactionById(crew.OwnerKey);
+                    if (faction != null)
+                    {
+                        for (int i = 0; i < players.Count; i++)
+                        {
+                            var p = players[i];
+                            if (p == null || notified.Contains(p.SteamUserId))
+                                continue;
+                            if (!faction.IsMember(p.IdentityId))
+                                continue;
+                            Notify(p.SteamUserId, text);
+                            notified.Add(p.SteamUserId);
+                        }
+                    }
+                }
+
+                for (int i = 0; i < players.Count; i++)
+                {
+                    var p = players[i];
+                    if (p == null || notified.Contains(p.SteamUserId))
+                        continue;
+                    if (p.IdentityId == crew.OwnerIdentityId
+                        || (!crew.OwnerIsFaction && p.IdentityId == crew.OwnerKey))
+                    {
+                        Notify(p.SteamUserId, text);
+                        notified.Add(p.SteamUserId);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>Permanent loss when a live ambient/EVA bot is killed or vanishes unexpectedly.</summary>
+        public void HandleCrewBotKilled(CrewRecord crew)
+        {
+            if (crew == null || Store == null || string.IsNullOrEmpty(crew.CrewId))
+                return;
+            if (Store.Get(crew.CrewId) == null)
+                return;
+
+            long gridId = crew.GridEntityId;
+            bool wasSeated = crew.Status == CrewStatus.Seated && gridId != 0;
+            string name = CrewDisplayLabel(crew);
+            if (string.IsNullOrEmpty(name))
+                name = "Crew";
+
+            NotifyCrewOwners(crew, name + " Got killed, Boss.");
+
+            if (!RemoveCrew(crew.CrewId))
+                return;
+
+            if (wasSeated)
+            {
+                IMyCubeGrid grid;
+                if (TryGetGrid(gridId, out grid))
+                    RefreshGridBuffs(grid);
+            }
+            BroadcastRoster(gridId);
+        }
+
+        public bool TryReloadHireWorldConfig(out string error)
+        {
+            error = null;
+            try
+            {
+                LoadHireWorldConfig();
+                return true;
+            }
+            catch (Exception e)
+            {
+                error = e.Message;
+                return false;
+            }
+        }
+
+        public void AdminBroadcastRoster()
+        {
+            BroadcastRoster(0);
+        }
+
+        public void AdminBroadcastHirePool(HireBlockPool pool)
+        {
+            BroadcastHirePool(pool);
+        }
+
+        public void AdminResolveOwnerKey(long identityId, out long ownerKey, out bool ownerIsFaction)
+        {
+            ResolveOwnerKey(identityId, out ownerKey, out ownerIsFaction);
+        }
+
+        public Random HireRng { get { return _hireRng; } }
+
+        public void AdminRefreshGridBuffs(IMyCubeGrid grid)
+        {
+            RefreshGridBuffs(grid);
         }
 
         public void ClientRequestHire(long gridEntityId, int stars, bool skipCharge = false, CrewRole role = CrewRole.Gunner)
@@ -326,41 +759,119 @@ namespace HireCrew
 
         public void ClientRequestHireRefreshMinutes(long blockEntityId, int refreshMinutes)
         {
-            int mult = CrewConfig.DefaultPriceMultiplierPercent;
-            if (HirePools != null)
-            {
-                var existing = HirePools.Get(blockEntityId);
-                if (existing != null && existing.PriceMultiplierPercent > 0)
-                    mult = existing.PriceMultiplierPercent;
-            }
-            ClientRequestHireDeskSettings(blockEntityId, refreshMinutes, mult);
+            var req = BuildDeskSettingsFromPool(blockEntityId);
+            req.RefreshMinutes = refreshMinutes;
+            ClientRequestHireDeskSettings(req);
         }
 
         public void ClientRequestHirePriceMultiplier(long blockEntityId, int priceMultiplierPercent)
         {
-            int minutes = CrewConfig.DefaultRefreshMinutes;
-            if (HirePools != null)
-            {
-                var existing = HirePools.Get(blockEntityId);
-                if (existing != null)
-                    minutes = existing.RefreshMinutes;
-            }
-            ClientRequestHireDeskSettings(blockEntityId, minutes, priceMultiplierPercent);
+            var req = BuildDeskSettingsFromPool(blockEntityId);
+            req.PriceMultiplierPercent = priceMultiplierPercent;
+            ClientRequestHireDeskSettings(req);
         }
 
-        public void ClientRequestHireDeskSettings(long blockEntityId, int refreshMinutes, int priceMultiplierPercent)
+        public void ClientRequestHireMinCandidates(long blockEntityId, int minCandidates)
         {
-            var req = new HireRefreshRequest
-            {
-                BlockEntityId = blockEntityId,
-                RefreshMinutes = refreshMinutes,
-                PriceMultiplierPercent = priceMultiplierPercent
-            };
+            var req = BuildDeskSettingsFromPool(blockEntityId);
+            req.MinCandidates = minCandidates;
+            if (req.MaxCandidates < req.MinCandidates)
+                req.MaxCandidates = req.MinCandidates;
+            ClientRequestHireDeskSettings(req);
+        }
+
+        public void ClientRequestHireMaxCandidates(long blockEntityId, int maxCandidates)
+        {
+            var req = BuildDeskSettingsFromPool(blockEntityId);
+            req.MaxCandidates = maxCandidates;
+            if (req.MinCandidates > req.MaxCandidates)
+                req.MinCandidates = req.MaxCandidates;
+            ClientRequestHireDeskSettings(req);
+        }
+
+        public void ClientRequestHireStarBias(long blockEntityId, StarBias bias)
+        {
+            var req = BuildDeskSettingsFromPool(blockEntityId);
+            req.StarBias = (int)bias;
+            ClientRequestHireDeskSettings(req);
+        }
+
+        public void ClientRequestHireAllowedRoles(long blockEntityId, int allowedRoles)
+        {
+            var req = BuildDeskSettingsFromPool(blockEntityId);
+            req.AllowedRoles = allowedRoles;
+            ClientRequestHireDeskSettings(req);
+        }
+
+        public void ClientRequestHireRefillOnHire(long blockEntityId, bool refillOnHire)
+        {
+            var req = BuildDeskSettingsFromPool(blockEntityId);
+            req.RefillOnHire = refillOnHire;
+            ClientRequestHireDeskSettings(req);
+        }
+
+        public void ClientRequestHireReroll(long blockEntityId)
+        {
+            var req = BuildDeskSettingsFromPool(blockEntityId);
+            req.ForceReroll = true;
+            ClientRequestHireDeskSettings(req);
+        }
+
+        public void ClientRequestHireDeskSettings(HireRefreshRequest req)
+        {
+            if (req == null) return;
             var data = CrewNetworking.Serialize(req);
             if (MyAPIGateway.Multiplayer.IsServer)
                 HandleHireRefresh(req, MyAPIGateway.Session.Player.IdentityId, MyAPIGateway.Multiplayer.MyId);
             else
                 CrewNetworking.SendToServer(CrewNetworking.HireRefreshMsg, data);
+        }
+
+        public void ClientRequestHireDeskSettings(
+            long blockEntityId,
+            int refreshMinutes,
+            int priceMultiplierPercent,
+            int minCandidates,
+            int maxCandidates,
+            int allowedRoles,
+            int starBias,
+            bool refillOnHire,
+            bool forceReroll)
+        {
+            ClientRequestHireDeskSettings(new HireRefreshRequest
+            {
+                BlockEntityId = blockEntityId,
+                RefreshMinutes = refreshMinutes,
+                PriceMultiplierPercent = priceMultiplierPercent,
+                MinCandidates = minCandidates,
+                MaxCandidates = maxCandidates,
+                AllowedRoles = allowedRoles,
+                StarBias = starBias,
+                RefillOnHire = refillOnHire,
+                ForceReroll = forceReroll
+            });
+        }
+
+        private HireRefreshRequest BuildDeskSettingsFromPool(long blockEntityId)
+        {
+            var world = HireWorldConfig.Current ?? HireWorldConfig.CreateDefaults();
+            var pool = HirePools != null ? HirePools.Get(blockEntityId) : null;
+            if (pool != null)
+                CrewHireGenerator.NormalizeDeskSettings(pool);
+            return new HireRefreshRequest
+            {
+                BlockEntityId = blockEntityId,
+                RefreshMinutes = pool != null ? pool.RefreshMinutes : world.RefreshMinutesDefault,
+                PriceMultiplierPercent = pool != null && pool.PriceMultiplierPercent > 0
+                    ? pool.PriceMultiplierPercent
+                    : world.PriceMultiplierPercentDefault,
+                MinCandidates = pool != null && pool.MinCandidates > 0 ? pool.MinCandidates : world.MinCandidates,
+                MaxCandidates = pool != null && pool.MaxCandidates > 0 ? pool.MaxCandidates : world.MaxCandidates,
+                AllowedRoles = pool != null && pool.AllowedRoles != 0 ? pool.AllowedRoles : world.AllowedRolesMask,
+                StarBias = pool != null ? pool.StarBias : (int)StarBias.Balanced,
+                RefillOnHire = pool != null && pool.RefillOnHire,
+                ForceReroll = false
+            };
         }
 
         public void ClientRequestHirePool(long blockEntityId)
@@ -378,6 +889,12 @@ namespace HireCrew
             if (_hud != null)
                 _hud.OpenHireDesk(blockEntityId);
             ClientRequestHirePool(blockEntityId);
+        }
+
+        public void ClientToggleCrewUi(long preferredGridEntityId = 0)
+        {
+            if (_hud != null)
+                _hud.ToggleUi(preferredGridEntityId);
         }
 
         public void ClientRequestAssign(string crewId, long gridEntityId, long seatEntityId, long weaponEntityId)
@@ -565,7 +1082,13 @@ namespace HireCrew
             Store.Upsert(record);
             Notify(steamId, "Hired " + record.DisplayName + " for " + candidate.Price + " sc — added to roster");
             BroadcastRoster(0);
-            SendHirePoolTo(steamId, pool);
+            if (pool.RefillOnHire)
+            {
+                CrewHireGenerator.RefillOne(pool, _hireRng);
+                BroadcastHirePool(pool);
+            }
+            else
+                SendHirePoolTo(steamId, pool);
         }
 
         private void HandleHireRefresh(HireRefreshRequest req, long identityId, ulong steamId)
@@ -578,12 +1101,48 @@ namespace HireCrew
             if (!HasManagePermission(identityId, grid)) { Notify(steamId, "No permission"); return; }
 
             var pool = HirePools.Ensure(block.EntityId, grid.EntityId, _hireRng, DateTime.UtcNow);
-            pool.RefreshMinutes = CrewConfig.ClampRefreshMinutes(req.RefreshMinutes);
-            // Multiplier rescales current candidate prices; refresh interval change does not reroll.
-            int mult = req.PriceMultiplierPercent > 0
-                ? req.PriceMultiplierPercent
-                : CrewConfig.DefaultPriceMultiplierPercent;
-            CrewHireGenerator.ApplyMultiplierToPool(pool, mult);
+            CrewHireGenerator.NormalizeDeskSettings(pool);
+
+            int oldMin = pool.MinCandidates;
+            int oldMax = pool.MaxCandidates;
+            int oldRoles = pool.AllowedRoles;
+            int oldBias = pool.StarBias;
+            int oldPrice = pool.PriceMultiplierPercent;
+
+            pool.RefreshMinutes = req.RefreshMinutes;
+            pool.MinCandidates = req.MinCandidates;
+            pool.MaxCandidates = req.MaxCandidates;
+            pool.AllowedRoles = req.AllowedRoles;
+            pool.StarBias = req.StarBias;
+            pool.RefillOnHire = req.RefillOnHire;
+            // Keep old PriceMultiplierPercent until rescale/reroll decision.
+            CrewHireGenerator.NormalizeDeskSettings(pool);
+
+            bool shapeChanged = req.ForceReroll
+                || pool.MinCandidates != oldMin
+                || pool.MaxCandidates != oldMax
+                || pool.AllowedRoles != oldRoles
+                || pool.StarBias != oldBias;
+
+            int newPrice = CrewConfig.ClampPriceMultiplierPercent(
+                req.PriceMultiplierPercent > 0 ? req.PriceMultiplierPercent : oldPrice);
+            bool priceChanged = newPrice != oldPrice;
+
+            if (shapeChanged)
+            {
+                pool.PriceMultiplierPercent = newPrice;
+                CrewHireGenerator.RefreshPool(pool, _hireRng, DateTime.UtcNow);
+            }
+            else if (priceChanged)
+            {
+                CrewHireGenerator.ApplyMultiplierToPool(pool, newPrice);
+            }
+            else
+            {
+                pool.PriceMultiplierPercent = newPrice;
+                // refresh-only or refill-only: no candidate mutation
+            }
+
             BroadcastHirePool(pool);
         }
 
@@ -838,11 +1397,12 @@ namespace HireCrew
                     return "Not a WeaponCore weapon";
             }
 
-            // Logical crew: claim seat (+weapon for gunners). No live NPC (whitelist).
+            // Logical crew: claim seat (+weapon for gunners). Ambient bot may spawn later nearby.
             // Still reject a seat a player is currently using.
             if (CrewStationLogic.IsSeatOccupiedByPlayer(seat))
                 return "Seat occupied";
 
+            CrewAmbientPresence.DespawnCrewBot(this, crew, notify: false);
             crew.SeatEntityId = req.SeatEntityId;
             crew.WeaponEntityId = needsWeapon ? (long?)req.WeaponEntityId : null;
             crew.CharacterEntityId = null;
@@ -1126,6 +1686,8 @@ namespace HireCrew
         private void ClearCrewStationing(CrewRecord crew)
         {
             if (crew == null) return;
+            CrewRepairMission.CancelForCrew(crew.CrewId);
+            CrewAmbientPresence.DespawnCrewBot(this, crew, notify: false);
             var label = CrewDisplayLabel(crew);
             if (crew.Status == CrewStatus.Seated && crew.SeatEntityId.HasValue)
                 ClearBlockCrewName(crew.SeatEntityId, label);
@@ -1393,6 +1955,7 @@ namespace HireCrew
                     }
                 }
 
+                // Bots do not persist across save/load — drop stale CharacterEntityId.
                 if (crew.CharacterEntityId.HasValue)
                 {
                     crew.CharacterEntityId = null;

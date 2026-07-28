@@ -1,0 +1,247 @@
+using System;
+using System.Collections.Generic;
+using Sandbox.Game;
+using Sandbox.ModAPI;
+using VRage.Game.ModAPI;
+using VRage.ModAPI;
+using VRage.Utils;
+using VRageMath;
+
+namespace HireCrew
+{
+    /// <summary>
+    /// AiEnabled-style bot controller pool: SpawnBot creates an IsBot player with an
+    /// EntityController; we harvest that controller, delete the dummy body, then
+    /// TakeControl on HireCrew ambient characters. Required for walk anim + no
+    /// "disconnected player" HUD icon (plain OB characters lack a bot identity).
+    ///
+    /// Note: MyPlayerCollection.CreateNewIdentity/Player are not on the ModAPI and
+    /// Reflection is prohibited for script mods — SpawnBot harvest is the only path.
+    /// </summary>
+    public static class CrewBotControllers
+    {
+        public sealed class ControlInfo
+        {
+            public IMyIdentity Identity;
+            public IMyEntityController Controller;
+        }
+
+        private static readonly List<ControlInfo> Pool = new List<ControlInfo>();
+        private static readonly HashSet<long> PendingHarvestEntityIds = new HashSet<long>();
+        private static readonly List<IMyCharacter> DummiesToClose = new List<IMyCharacter>();
+        private static readonly List<IMyPlayer> PlayerScratch = new List<IMyPlayer>();
+
+        // HireCrew_Crew = survival-enabled humanoid. Wildlife subtypes often still
+        // produce an IsBot EntityController even when humanoid SpawnBot returns 0.
+        private static readonly string[] HarvestSubtypes =
+        {
+            CrewConfig.AmbientBotSubtype,
+            "SpaceSpider",
+            "SpaceSpiderBlack",
+            "Wolf",
+            "Female_Astronaut",
+            CrewConfig.AmbientBotSubtypeFallback
+        };
+
+        private static Vector3D _harvestPos;
+        private static bool _harvestPosReady;
+        private static int _spawnCooldownTicks;
+        private static int _closeDelayTicks;
+        private static int _logThrottle;
+        private static int _harvestPosVariant;
+
+        private const int TargetPoolSize = 4;
+        private const int SpawnCooldownTicks = 90;
+        // Close far-away harvest dummies quickly; they must not linger in the sim.
+        private const int DummyCloseDelayTicks = 30;
+
+        public static int PoolCount
+        {
+            get { return Pool.Count; }
+        }
+
+        public static void Clear()
+        {
+            Pool.Clear();
+            PendingHarvestEntityIds.Clear();
+            DummiesToClose.Clear();
+            _harvestPosReady = false;
+            _spawnCooldownTicks = 0;
+            _closeDelayTicks = 0;
+            _harvestPosVariant = 0;
+        }
+
+        /// <summary>Call every server tick (~1 Hz is fine; more is better for harvest).</summary>
+        public static void Tick()
+        {
+            if (MyAPIGateway.Multiplayer == null || !MyAPIGateway.Multiplayer.IsServer)
+                return;
+
+            TryHarvestPending();
+            TickDummyClose();
+
+            if (_spawnCooldownTicks > 0)
+                _spawnCooldownTicks--;
+
+            int needed = TargetPoolSize - Pool.Count - PendingHarvestEntityIds.Count;
+            if (needed > 0 && _spawnCooldownTicks <= 0)
+                TrySpawnHarvestDummy();
+        }
+
+        public static ControlInfo Take()
+        {
+            for (int i = 0; i < Pool.Count; i++)
+            {
+                var info = Pool[i];
+                if (info == null || info.Identity == null || info.Controller == null)
+                {
+                    Pool.RemoveAt(i);
+                    i--;
+                    continue;
+                }
+
+                // Only skip identities owned by a real human player.
+                // NOTE: Do NOT filter on TryGetSteamId — wildlife/bot identities can
+                // report non-zero steam ids in SP, which previously left pool full
+                // while ambient spawned uncontrolled (disconnected icon, no walk anim).
+                IMyPlayer owner = MyAPIGateway.Players.TryGetIdentityId(info.Identity.IdentityId);
+                if (owner != null && !owner.IsBot)
+                    continue;
+
+                Pool.RemoveAt(i);
+                return info;
+            }
+
+            return null;
+        }
+
+        public static void Return(ControlInfo info)
+        {
+            if (info == null || info.Controller == null || info.Identity == null)
+                return;
+            Pool.Add(info);
+        }
+
+        private static void EnsureHarvestPosition()
+        {
+            // Always deep space — never near the player. Harvest dummies (SpaceSpider) briefly
+            // show a disconnected-player icon; spawning overhead made that visible in-game.
+            _harvestPosVariant++;
+            var rng = new Random(_harvestPosVariant * 9973 + 17);
+            double r = 8000000 + rng.NextDouble() * 4000000;
+            double ang = rng.NextDouble() * Math.PI * 2.0;
+            _harvestPos = new Vector3D(Math.Cos(ang) * r, (rng.NextDouble() - 0.5) * r * 0.2, Math.Sin(ang) * r);
+            _harvestPosReady = true;
+        }
+
+        private static void TrySpawnHarvestDummy()
+        {
+            EnsureHarvestPosition();
+            _spawnCooldownTicks = SpawnCooldownTicks;
+
+            foreach (var subtype in HarvestSubtypes)
+            {
+                if (string.IsNullOrEmpty(subtype))
+                    continue;
+
+                long spawnId = 0;
+                try
+                {
+                    spawnId = MyVisualScriptLogicProvider.SpawnBot(
+                        subtype, _harvestPos, Vector3D.Forward, Vector3D.Up, "");
+                }
+                catch (Exception e)
+                {
+                    Log("harvest SpawnBot threw subtype=" + subtype + ": " + e.Message);
+                    continue;
+                }
+
+                if (spawnId == 0)
+                    continue;
+
+                IMyEntity ent;
+                if (!MyAPIGateway.Entities.TryGetEntityById(spawnId, out ent) || ent == null)
+                    continue;
+
+                var bot = ent as IMyCharacter;
+                if (bot == null || bot.Closed)
+                    continue;
+
+                PendingHarvestEntityIds.Add(bot.EntityId);
+                Log("harvest dummy spawned subtype=" + subtype + " id=" + bot.EntityId);
+                return;
+            }
+
+            if (++_logThrottle % 10 == 1)
+                Log("harvest SpawnBot failed for all subtypes (pool=" + Pool.Count + ")");
+        }
+
+        private static void TryHarvestPending()
+        {
+            if (PendingHarvestEntityIds.Count == 0)
+                return;
+
+            PlayerScratch.Clear();
+            MyAPIGateway.Players.GetPlayers(PlayerScratch);
+            for (int i = 0; i < PlayerScratch.Count; i++)
+            {
+                var player = PlayerScratch[i];
+                if (player == null || !player.IsBot || player.Controller == null || player.Identity == null)
+                    continue;
+                if (player.Character == null || player.Character.Closed)
+                    continue;
+                if (!PendingHarvestEntityIds.Remove(player.Character.EntityId))
+                    continue;
+
+                // Kick dummy out of any auto-joined faction (AiEnabled).
+                try
+                {
+                    var fac = MyAPIGateway.Session.Factions.TryGetPlayerFaction(player.IdentityId);
+                    if (fac != null)
+                        MyAPIGateway.Session.Factions.KickMember(fac.FactionId, player.IdentityId);
+                }
+                catch { }
+
+                Pool.Add(new ControlInfo
+                {
+                    Identity = player.Identity,
+                    Controller = player.Controller
+                });
+
+                DummiesToClose.Add(player.Character);
+                _closeDelayTicks = DummyCloseDelayTicks;
+                Log("harvested bot controller id=" + player.IdentityId + " pool=" + Pool.Count);
+                return;
+            }
+        }
+
+        private static void TickDummyClose()
+        {
+            if (DummiesToClose.Count == 0)
+                return;
+            if (_closeDelayTicks > 0)
+            {
+                _closeDelayTicks--;
+                return;
+            }
+
+            for (int i = 0; i < DummiesToClose.Count; i++)
+            {
+                var bot = DummiesToClose[i];
+                try
+                {
+                    if (bot != null && !bot.Closed)
+                        bot.Close();
+                }
+                catch { }
+            }
+            DummiesToClose.Clear();
+        }
+
+        private static void Log(string msg)
+        {
+            try { MyLog.Default.WriteLine("HireCrew bots: " + msg); }
+            catch { }
+        }
+    }
+}
