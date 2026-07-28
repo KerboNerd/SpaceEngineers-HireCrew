@@ -10,6 +10,15 @@ namespace HireCrew
         public const ushort DismissMsg = 41733;
         public const ushort RosterMsg = 41734;
         public const ushort NotifyMsg = 41735;
+        public const ushort AssignAmenityMsg = 41736;
+        public const ushort HireFromPoolMsg = 41737;
+        public const ushort HirePoolSyncMsg = 41738;
+        public const ushort HireRefreshMsg = 41739;
+        public const ushort HirePoolRequestMsg = 41740;
+        public const ushort UnassignMsg = 41741;
+        public const ushort TrainMsg = 41742;
+        public const ushort CancelTrainMsg = 41743;
+        public const ushort BulkAssignMsg = 41744;
 
         public static void Register(Action<ushort, byte[], ulong, bool> handler)
         {
@@ -18,6 +27,15 @@ namespace HireCrew
             MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(DismissMsg, handler);
             MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(RosterMsg, handler);
             MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(NotifyMsg, handler);
+            MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(AssignAmenityMsg, handler);
+            MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(HireFromPoolMsg, handler);
+            MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(HirePoolSyncMsg, handler);
+            MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(HireRefreshMsg, handler);
+            MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(HirePoolRequestMsg, handler);
+            MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(UnassignMsg, handler);
+            MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(TrainMsg, handler);
+            MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(CancelTrainMsg, handler);
+            MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(BulkAssignMsg, handler);
         }
 
         public static void Unregister(Action<ushort, byte[], ulong, bool> handler)
@@ -27,6 +45,15 @@ namespace HireCrew
             MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(DismissMsg, handler);
             MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(RosterMsg, handler);
             MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(NotifyMsg, handler);
+            MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(AssignAmenityMsg, handler);
+            MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(HireFromPoolMsg, handler);
+            MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(HirePoolSyncMsg, handler);
+            MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(HireRefreshMsg, handler);
+            MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(HirePoolRequestMsg, handler);
+            MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(UnassignMsg, handler);
+            MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(TrainMsg, handler);
+            MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(CancelTrainMsg, handler);
+            MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(BulkAssignMsg, handler);
         }
 
         public static byte[] Serialize<T>(T obj)
