@@ -655,6 +655,13 @@ namespace HireCrew
                 role = CrewRole.DamageControl;
                 return true;
             }
+            if (string.Equals(roleName, "salvage", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(roleName, "salv", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(roleName, "grinder", StringComparison.OrdinalIgnoreCase))
+            {
+                role = CrewRole.SalvageOps;
+                return true;
+            }
             return false;
         }
 

@@ -16,7 +16,8 @@ namespace HireCrew
         Helmsman = 2,
         Propulsion = 3,
         Quartermaster = 4,
-        DamageControl = 5
+        DamageControl = 5,
+        SalvageOps = 6
     }
 
     public enum StarBias
@@ -242,11 +243,84 @@ namespace HireCrew
         [ProtoMember(6)] public double LocalZ;
     }
 
+    public enum RepairMissionState
+    {
+        Idle = 0,
+        WalkOut = 1,
+        AtExit = 2,
+        EvaTransit = 3,
+        Welding = 4,
+        ReturnExit = 5,
+        WalkHome = 6
+    }
+
+    public static class RepairMissionHintFlags
+    {
+        public const int None = 0;
+        public const int OutOfComps = 1;
+        public const int ProjectedTarget = 2;
+    }
+
+    [ProtoContract]
+    public sealed class RepairMissionSnapshotEntry
+    {
+        [ProtoMember(1)] public string CrewId;
+        [ProtoMember(2)] public string DisplayName;
+        [ProtoMember(3)] public long GridEntityId;
+        [ProtoMember(4)] public int State;
+        [ProtoMember(5)] public int Hints;
+    }
+
+    [ProtoContract]
+    public sealed class RepairMissionSync
+    {
+        [ProtoMember(1)] public List<RepairMissionSnapshotEntry> Entries = new List<RepairMissionSnapshotEntry>();
+    }
+
     [ProtoContract]
     public sealed class RepairDispatchRequest
     {
         [ProtoMember(1)] public string CrewId;
         /// <summary>false = Send this crew, true = Recall this crew.</summary>
         [ProtoMember(2)] public bool Recall;
+    }
+
+    public enum SalvageMissionState
+    {
+        Idle = 0,
+        EvaTransit = 1,
+        Grinding = 2
+    }
+
+    public static class SalvageMissionHintFlags
+    {
+        public const int None = 0;
+        public const int CargoFull = 1;
+    }
+
+    [ProtoContract]
+    public sealed class SalvageMissionSnapshotEntry
+    {
+        [ProtoMember(1)] public string CrewId;
+        [ProtoMember(2)] public string DisplayName;
+        [ProtoMember(3)] public long GridEntityId;
+        [ProtoMember(4)] public int State;
+        [ProtoMember(5)] public int Hints;
+    }
+
+    [ProtoContract]
+    public sealed class SalvageMissionSync
+    {
+        [ProtoMember(1)] public List<SalvageMissionSnapshotEntry> Entries = new List<SalvageMissionSnapshotEntry>();
+    }
+
+    [ProtoContract]
+    public sealed class SalvageDispatchRequest
+    {
+        [ProtoMember(1)] public string CrewId;
+        /// <summary>false = Salvage this crew, true = Recall this crew.</summary>
+        [ProtoMember(2)] public bool Recall;
+        /// <summary>Target wreck/home grid. Ignored when Recall is true.</summary>
+        [ProtoMember(3)] public long TargetGridEntityId;
     }
 }

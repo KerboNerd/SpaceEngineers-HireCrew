@@ -13,17 +13,6 @@ using VRageMath;
 
 namespace HireCrew
 {
-    public enum RepairMissionState
-    {
-        Idle = 0,
-        WalkOut = 1,
-        AtExit = 2,
-        EvaTransit = 3,
-        Welding = 4,
-        ReturnExit = 5,
-        WalkHome = 6
-    }
-
     /// <summary>
     /// Per-grid Damage Control EVA repair missions (waypoint walk → exit → weld → return).
     /// </summary>
@@ -100,7 +89,8 @@ namespace HireCrew
             new Dictionary<string, int>();
         private static readonly Dictionary<string, int> CargoBeforeScratch =
             new Dictionary<string, int>();
-        private static readonly List<IMyInventory> InvScratch = new List<IMyInventory>(32);
+        private static readonly List<IMyInventory> InvScratch = new List<IMyInventory>(64);
+        private static readonly List<IMyCubeGrid> GridGroupScratch = new List<IMyCubeGrid>(8);
         private struct CachedWork
         {
             public Vector3I Cell;
@@ -147,6 +137,43 @@ namespace HireCrew
             CrewCooldownUntil.Clear();
         }
 
+        /// <summary>
+        /// Fills <paramref name="into"/> with non-Idle mission snapshots for HUD sync.
+        /// </summary>
+        public static void CollectActiveSnapshots(List<RepairMissionSnapshotEntry> into)
+        {
+            if (into == null) return;
+            into.Clear();
+            foreach (var kv in ByCrew)
+            {
+                MissionRuntime m = kv.Value;
+                if (m == null || m.State == RepairMissionState.Idle) continue;
+                if (string.IsNullOrEmpty(m.CrewId)) continue;
+
+                int hints = RepairMissionHintFlags.None;
+                if (m.NotifiedOutOfComps) hints |= RepairMissionHintFlags.OutOfComps;
+                if (m.TargetIsProjected) hints |= RepairMissionHintFlags.ProjectedTarget;
+
+                string name = m.CrewId;
+                var session = CrewSession.Instance;
+                if (session != null && session.Store != null)
+                {
+                    CrewRecord crew = session.Store.Get(m.CrewId);
+                    if (crew != null && !string.IsNullOrEmpty(crew.DisplayName))
+                        name = crew.DisplayName;
+                }
+
+                into.Add(new RepairMissionSnapshotEntry
+                {
+                    CrewId = m.CrewId,
+                    DisplayName = name,
+                    GridEntityId = m.GridEntityId,
+                    State = (int)m.State,
+                    Hints = hints
+                });
+            }
+        }
+
         public static bool TryGetMissionPose(
             string crewId,
             IMyTerminalBlock seat,
@@ -167,6 +194,15 @@ namespace HireCrew
             var grid = seat.CubeGrid;
             long gridId = m.GridEntityId;
             up = seat.WorldMatrix.Up;
+
+            // If somehow still marked returning, prefer station pose for ambient snap.
+            if (m.State == RepairMissionState.ReturnExit || m.State == RepairMissionState.WalkHome)
+            {
+                pos = seat.WorldMatrix.Translation + seat.WorldMatrix.Right * 1.2 + up * 0.1;
+                forward = seat.WorldMatrix.Forward;
+                return true;
+            }
+
             var paths = CrewSession.Instance != null ? CrewSession.Instance.RepairPaths : null;
             var path = paths != null ? paths.Get(gridId) : null;
 
@@ -181,8 +217,7 @@ namespace HireCrew
                     return false;
 
                 if (m.State == RepairMissionState.EvaTransit
-                    || m.State == RepairMissionState.Welding
-                    || m.State == RepairMissionState.ReturnExit)
+                    || m.State == RepairMissionState.Welding)
                 {
                     Vector3D outward = wp - grid.WorldAABB.Center;
                     if (outward.LengthSquared() < 0.01)
@@ -301,7 +336,7 @@ namespace HireCrew
                         TickWalk(session, m, crew, character, seat, grid, true, dt);
                         break;
                     case RepairMissionState.AtExit:
-                        TickAtExit(m, character, seat, grid);
+                        TickAtExit(m, crew, character, seat, grid);
                         break;
                     case RepairMissionState.EvaTransit:
                         TickEvaTransit(session, m, crew, character, seat, grid, dt);
@@ -310,10 +345,8 @@ namespace HireCrew
                         TickWelding(session, m, crew, character, seat, grid, dt);
                         break;
                     case RepairMissionState.ReturnExit:
-                        TickReturnExit(m, character, seat, grid, dt);
-                        break;
                     case RepairMissionState.WalkHome:
-                        TickWalk(session, m, crew, character, seat, grid, false, dt);
+                        FinishMission(m);
                         break;
                 }
             }
@@ -440,20 +473,15 @@ namespace HireCrew
                 }
                 if (m.State == RepairMissionState.EvaTransit || m.State == RepairMissionState.ReturnExit)
                 {
+                    if (m.State == RepairMissionState.ReturnExit)
+                    {
+                        FinishMission(m);
+                        continue;
+                    }
                     m.StateSeconds += dt;
                     if (m.StateSeconds > 2.0)
                     {
-                        if (m.State == RepairMissionState.EvaTransit)
-                            m.State = RepairMissionState.Welding;
-                        else if (!m.UsesPath)
-                            FinishMission(m);
-                        else
-                        {
-                            var pathHome = session.RepairPaths.Get(m.GridEntityId);
-                            m.WaypointIndex = pathHome != null && pathHome.Waypoints != null
-                                ? Math.Max(0, pathHome.Waypoints.Count - 1) : 0;
-                            m.State = RepairMissionState.WalkHome;
-                        }
+                        m.State = RepairMissionState.Welding;
                         m.StateSeconds = 0;
                     }
                     continue;
@@ -522,10 +550,7 @@ namespace HireCrew
                 }
                 else if (m.State == RepairMissionState.WalkHome)
                 {
-                    if (m.WaypointIndex > 0)
-                        m.WaypointIndex--;
-                    if (m.WaypointIndex <= 0)
-                        FinishMission(m);
+                    FinishMission(m);
                 }
             }
         }
@@ -595,6 +620,7 @@ namespace HireCrew
 
         private static void TickAtExit(
             MissionRuntime m,
+            CrewRecord crew,
             IMyCharacter character,
             IMyTerminalBlock seat,
             IMyCubeGrid grid)
@@ -616,7 +642,8 @@ namespace HireCrew
 
             if (character != null && !character.Closed)
             {
-                FlyToward(m, character, grid, exterior, CrewConfig.RepairEvaSpeedMeters, 1f / 60f);
+                float evaSpeed = CrewConfig.GetRepairEvaSpeedMeters(crew != null ? crew.Stars : 0);
+                FlyToward(m, character, grid, exterior, evaSpeed, 1f / 60f);
                 if (Vector3D.DistanceSquared(character.GetPosition(), exterior) < 1.0)
                 {
                     m.State = RepairMissionState.EvaTransit;
@@ -654,7 +681,7 @@ namespace HireCrew
                     if (character != null && !character.Closed)
                     {
                         Vector3D rally = GetDispatchRally(m, grid, fromPos);
-                        FlyToward(m, character, grid, rally, CrewConfig.RepairEvaSpeedMeters, dt);
+                        FlyToward(m, character, grid, rally, CrewConfig.GetRepairEvaSpeedMeters(crew.Stars), dt);
                     }
                     return;
                 }
@@ -678,7 +705,7 @@ namespace HireCrew
             if (character != null && !character.Closed)
             {
                 UpdateStuckWatch(m, character, grid, GetSlimWorld(slim, grid), dt);
-                FlyToward(m, character, grid, flyTo, CrewConfig.RepairEvaSpeedMeters, dt);
+                FlyToward(m, character, grid, flyTo, CrewConfig.GetRepairEvaSpeedMeters(crew.Stars), dt);
 
                 Vector3D blockPos = GetSlimWorld(slim, grid);
                 double weldR = CrewConfig.RepairWeldRangeMeters;
@@ -805,7 +832,7 @@ namespace HireCrew
                     EnsureWeldApproach(m, grid, slim, pos);
                     Vector3D hover = GetHover(m);
                     UpdateStuckWatch(m, character, grid, blockPos, dt);
-                    FlyToward(m, character, grid, hover, CrewConfig.RepairEvaSpeedMeters * 0.7f, dt);
+                    FlyToward(m, character, grid, hover, CrewConfig.GetRepairEvaSpeedMeters(crew.Stars) * 0.7f, dt);
                 }
                 else
                 {
@@ -980,95 +1007,71 @@ namespace HireCrew
             return false;
         }
 
-        private static void TickReturnExit(
-            MissionRuntime m,
-            IMyCharacter character,
-            IMyTerminalBlock seat,
-            IMyCubeGrid grid,
-            float dt)
+        private static void TeleportHome(IMyCharacter character, IMyTerminalBlock seat, IMyCubeGrid grid)
         {
-            // Local/station: fly back toward seat, then idle (no airlock path).
-            if (!m.UsesPath)
-            {
-                Vector3D home = seat != null
-                    ? seat.WorldMatrix.Translation + seat.WorldMatrix.Right * 1.2
-                    : grid.WorldAABB.Center;
-                if (character != null && !character.Closed)
-                {
-                    FlyToward(m, character, grid, home, CrewConfig.RepairEvaSpeedMeters, dt);
-                    if (Vector3D.DistanceSquared(character.GetPosition(), home) < 2.25)
-                    {
-                        StabilizeEvaPose(m, character, grid, true);
-                        Log("repair return crew=" + m.CrewId + " via=local");
-                        FinishMission(m);
-                    }
-                }
-                else if (m.StateSeconds > 2.0)
-                    FinishMission(m);
+            if (character == null || character.Closed || seat == null)
                 return;
-            }
-
-            Vector3D exitPos;
-            if (!TryGetExitWorld(m, grid, out exitPos))
+            try
             {
-                FinishMission(m);
-                return;
+                MatrixD wm = seat.WorldMatrix;
+                Vector3D up = wm.Up;
+                if (up.LengthSquared() < 0.01)
+                    up = Vector3D.Up;
+                up.Normalize();
+                Vector3D pos = wm.Translation + wm.Right * 1.2 + up * 0.1;
+                Vector3D forward = wm.Forward;
+                if (forward.LengthSquared() < 0.01)
+                    forward = Vector3D.Forward;
+                forward.Normalize();
+                character.WorldMatrix = MatrixD.CreateWorld(pos, forward, up);
+                character.SetPosition(pos);
+                CrewAmbientPresence.SetCharacterJetpack(character, false);
+                CrewAmbientPresence.StopCharacterMovement(character, grid);
+                BindEvaPhysics(character, grid);
             }
-
-            Vector3D outward = exitPos - grid.WorldAABB.Center;
-            if (outward.LengthSquared() < 0.01)
-                outward = grid.WorldMatrix.Forward;
-            outward.Normalize();
-            Vector3D exterior = exitPos + outward * 2.5;
-
-            if (character != null && !character.Closed)
-            {
-                FlyToward(m, character, grid, exterior, CrewConfig.RepairEvaSpeedMeters, dt);
-                if (Vector3D.DistanceSquared(character.GetPosition(), exterior) < 1.2)
-                {
-                    StabilizeEvaPose(m, character, grid, true);
-                    var path = CrewSession.Instance != null && CrewSession.Instance.RepairPaths != null
-                        ? CrewSession.Instance.RepairPaths.Get(m.GridEntityId)
-                        : null;
-                    m.WaypointIndex = path != null && path.Waypoints != null
-                        ? Math.Max(0, path.Waypoints.Count - 1)
-                        : 0;
-                    m.State = RepairMissionState.WalkHome;
-                    m.StateSeconds = 0;
-                    Log("repair return crew=" + m.CrewId);
-                }
-            }
-            else if (m.StateSeconds > 2.0)
-            {
-                var path = CrewSession.Instance != null && CrewSession.Instance.RepairPaths != null
-                    ? CrewSession.Instance.RepairPaths.Get(m.GridEntityId)
-                    : null;
-                m.WaypointIndex = path != null && path.Waypoints != null
-                    ? Math.Max(0, path.Waypoints.Count - 1)
-                    : 0;
-                m.State = RepairMissionState.WalkHome;
-                m.StateSeconds = 0;
-            }
+            catch { }
         }
 
         private static void BeginReturn(MissionRuntime m)
         {
-            if (m == null) return;
-            if (m.State == RepairMissionState.WalkHome || m.State == RepairMissionState.ReturnExit)
+            if (m == null || string.IsNullOrEmpty(m.CrewId))
                 return;
+
+            IMyCubeGrid grid = null;
             IMyEntity gridEnt;
             if (m.GridEntityId != 0
                 && MyAPIGateway.Entities.TryGetEntityById(m.GridEntityId, out gridEnt))
-            {
-                var grid = gridEnt as IMyCubeGrid;
-                if (grid != null)
-                    ClearCurrentTarget(m, grid);
-            }
+                grid = gridEnt as IMyCubeGrid;
+
+            if (grid != null)
+                ClearCurrentTarget(m, grid);
             else
                 StopWeldParticles(m.CrewId);
             ClearFlyDynamics(m);
-            m.State = RepairMissionState.ReturnExit;
-            m.StateSeconds = 0;
+
+            IMyTerminalBlock seat = null;
+            IMyCharacter character = null;
+            var session = CrewSession.Instance;
+            if (session != null && session.Store != null)
+            {
+                var crew = session.Store.Get(m.CrewId);
+                if (crew != null)
+                {
+                    TryGetCharacter(crew, out character);
+                    if (crew.SeatEntityId.HasValue)
+                    {
+                        IMyEntity seatEnt;
+                        if (MyAPIGateway.Entities.TryGetEntityById(crew.SeatEntityId.Value, out seatEnt))
+                            seat = seatEnt as IMyTerminalBlock;
+                    }
+                }
+            }
+
+            if (character != null && !character.Closed && seat != null && !seat.Closed)
+                TeleportHome(character, seat, grid ?? seat.CubeGrid);
+
+            Log("repair home teleport crew=" + m.CrewId);
+            FinishMission(m);
         }
 
         private static void FinishMission(MissionRuntime m)
@@ -1323,8 +1326,10 @@ namespace HireCrew
             if (Vector3D.DistanceSquared(from, hover) < 64.0)
                 return false;
 
-            BoundingBoxD box = grid.WorldAABB.GetInflated(CrewConfig.RepairEvaStandOffMeters + 1.5);
-            bool inside = box.Contains(from) != ContainmentType.Disjoint;
+            BoundingBoxD shipBox = grid.WorldAABB;
+            // Character-sized pad only — do not inflate by weld standoff or staging flies far off-hull.
+            BoundingBoxD padBox = shipBox.GetInflated(1.0);
+            bool inside = padBox.Contains(from) != ContainmentType.Disjoint;
 
             IHitInfo hit;
             bool rayHit = MyAPIGateway.Physics.CastRay(from, hover, out hit)
@@ -1345,15 +1350,24 @@ namespace HireCrew
             if (!inside && !blockedByShip)
                 return false;
 
-            // Stage on the HOVER / damage side of the hull. Nearest face to the bot is often
-            // the opposite side when they start inside, which causes the "fly away then back" path.
-            stage = ClosestPointOnAabbSurface(box, hover);
-            Vector3D outward = stage - box.Center;
-            if (outward.LengthSquared() > 0.01)
-            {
-                outward.Normalize();
-                stage += outward * 1.5;
-            }
+            // Only AABB-stage when the weld hover is already outside the world box. If hover is
+            // still inside (common — standoff is only a few meters), projecting onto the AABB
+            // surface flings the bot to a distant empty face on large/loose bounds.
+            if (shipBox.Contains(hover) != ContainmentType.Disjoint)
+                return false;
+
+            const double clearance = 0.75;
+            Vector3D surface;
+            if (!TryAabbExitToward(shipBox, from, hover, out surface))
+                surface = ClosestPointOnAabbSurface(shipBox, hover);
+            stage = surface + AabbFaceOutwardNormal(shipBox, surface) * clearance;
+
+            // Hard cap: staging must stay near the weld approach, never across the whole AABB.
+            const double maxFromHover = 3.0;
+            Vector3D away = stage - hover;
+            double awayLen = away.Length();
+            if (awayLen > maxFromHover)
+                stage = hover + away * (maxFromHover / awayLen);
 
             // Abort staging if it points away from the weld approach.
             Vector3D toHover = hover - from;
@@ -1369,25 +1383,106 @@ namespace HireCrew
             return Vector3D.DistanceSquared(stage, from) > 4.0;
         }
 
+        /// <summary>
+        /// Where the ray from→toward leaves the AABB. Requires <paramref name="toward"/> to lie
+        /// outside the box; otherwise callers would snap interior points onto a far face.
+        /// </summary>
+        private static bool TryAabbExitToward(BoundingBoxD box, Vector3D from, Vector3D toward, out Vector3D exit)
+        {
+            exit = toward;
+            if (box.Contains(toward) != ContainmentType.Disjoint)
+                return false;
+
+            Vector3D dir = toward - from;
+            double len = dir.Length();
+            if (len < 0.01)
+                return false;
+            dir /= len;
+
+            double tMin = double.NegativeInfinity;
+            double tMax = double.PositiveInfinity;
+            if (!ClipRaySlab(from.X, dir.X, box.Min.X, box.Max.X, ref tMin, ref tMax)
+                || !ClipRaySlab(from.Y, dir.Y, box.Min.Y, box.Max.Y, ref tMin, ref tMax)
+                || !ClipRaySlab(from.Z, dir.Z, box.Min.Z, box.Max.Z, ref tMin, ref tMax)
+                || tMax < 0.05)
+                return false;
+
+            // Exterior target: leave at the AABB exit on the way there.
+            double tExit = tMax;
+            if (tExit > len)
+                tExit = len;
+            exit = from + dir * tExit;
+            return true;
+        }
+
+        private static bool ClipRaySlab(
+            double origin, double dir, double min, double max, ref double tMin, ref double tMax)
+        {
+            if (Math.Abs(dir) < 1e-9)
+                return origin >= min && origin <= max;
+
+            double t1 = (min - origin) / dir;
+            double t2 = (max - origin) / dir;
+            if (t1 > t2)
+            {
+                double tmp = t1;
+                t1 = t2;
+                t2 = tmp;
+            }
+            if (t1 > tMin) tMin = t1;
+            if (t2 < tMax) tMax = t2;
+            return tMin <= tMax;
+        }
+
+        /// <summary>
+        /// Nearest point on the AABB surface. Interior points use true nearest-face distance
+        /// (not dominant half-extent ratio — that sends long ships to a far end-cap).
+        /// </summary>
         private static Vector3D ClosestPointOnAabbSurface(BoundingBoxD box, Vector3D p)
         {
-            Vector3D c = box.Center;
-            Vector3D half = (box.Max - box.Min) * 0.5;
-            Vector3D d = p - c;
-            double ax = Math.Abs(d.X) / Math.Max(half.X, 0.01);
-            double ay = Math.Abs(d.Y) / Math.Max(half.Y, 0.01);
-            double az = Math.Abs(d.Z) / Math.Max(half.Z, 0.01);
-            if (ax >= ay && ax >= az)
-                d.X = Math.Sign(d.X) * half.X;
-            else if (ay >= az)
-                d.Y = Math.Sign(d.Y) * half.Y;
-            else
-                d.Z = Math.Sign(d.Z) * half.Z;
-            // Clamp other axes onto the face.
-            d.X = Math.Max(-half.X, Math.Min(half.X, d.X));
-            d.Y = Math.Max(-half.Y, Math.Min(half.Y, d.Y));
-            d.Z = Math.Max(-half.Z, Math.Min(half.Z, d.Z));
-            return c + d;
+            bool outside = p.X < box.Min.X || p.X > box.Max.X
+                || p.Y < box.Min.Y || p.Y > box.Max.Y
+                || p.Z < box.Min.Z || p.Z > box.Max.Z;
+            if (outside)
+            {
+                return new Vector3D(
+                    Math.Max(box.Min.X, Math.Min(box.Max.X, p.X)),
+                    Math.Max(box.Min.Y, Math.Min(box.Max.Y, p.Y)),
+                    Math.Max(box.Min.Z, Math.Min(box.Max.Z, p.Z)));
+            }
+
+            double dxMin = p.X - box.Min.X;
+            double dxMax = box.Max.X - p.X;
+            double dyMin = p.Y - box.Min.Y;
+            double dyMax = box.Max.Y - p.Y;
+            double dzMin = p.Z - box.Min.Z;
+            double dzMax = box.Max.Z - p.Z;
+
+            double best = dxMin;
+            Vector3D result = new Vector3D(box.Min.X, p.Y, p.Z);
+            if (dxMax < best) { best = dxMax; result = new Vector3D(box.Max.X, p.Y, p.Z); }
+            if (dyMin < best) { best = dyMin; result = new Vector3D(p.X, box.Min.Y, p.Z); }
+            if (dyMax < best) { best = dyMax; result = new Vector3D(p.X, box.Max.Y, p.Z); }
+            if (dzMin < best) { best = dzMin; result = new Vector3D(p.X, p.Y, box.Min.Z); }
+            if (dzMax < best) { result = new Vector3D(p.X, p.Y, box.Max.Z); }
+            return result;
+        }
+
+        private static Vector3D AabbFaceOutwardNormal(BoundingBoxD box, Vector3D onSurface)
+        {
+            const double eps = 0.05;
+            if (Math.Abs(onSurface.X - box.Min.X) <= eps) return new Vector3D(-1, 0, 0);
+            if (Math.Abs(onSurface.X - box.Max.X) <= eps) return new Vector3D(1, 0, 0);
+            if (Math.Abs(onSurface.Y - box.Min.Y) <= eps) return new Vector3D(0, -1, 0);
+            if (Math.Abs(onSurface.Y - box.Max.Y) <= eps) return new Vector3D(0, 1, 0);
+            if (Math.Abs(onSurface.Z - box.Min.Z) <= eps) return new Vector3D(0, 0, -1);
+            if (Math.Abs(onSurface.Z - box.Max.Z) <= eps) return new Vector3D(0, 0, 1);
+
+            Vector3D o = onSurface - box.Center;
+            if (o.LengthSquared() < 0.01)
+                return Vector3D.Up;
+            o.Normalize();
+            return o;
         }
 
         private static void UpdateStuckWatch(
@@ -1462,27 +1557,35 @@ namespace HireCrew
             if (character == null || character.Closed || grid == null)
                 return;
 
-            BoundingBoxD box = grid.WorldAABB.GetInflated(CrewConfig.RepairEvaStandOffMeters + 2.5);
+            BoundingBoxD box = grid.WorldAABB;
             Vector3D from = character.GetPosition();
-            Vector3D stage = ClosestPointOnAabbSurface(box, from);
+            Vector3D anchor = preferToward.LengthSquared() > 0.01 ? preferToward : from;
+            Vector3D stage;
 
-            // Prefer the side toward the weld hover / preferred point.
-            Vector3D bias = preferToward - box.Center;
-            if (bias.LengthSquared() > 0.01)
+            Vector3D surface;
+            if (TryAabbExitToward(box, from, anchor, out surface))
             {
-                bias.Normalize();
-                Vector3D alt = ClosestPointOnAabbSurface(box, box.Center + bias * 1000.0);
-                if (Vector3D.DistanceSquared(alt, preferToward) < Vector3D.DistanceSquared(stage, preferToward))
-                    stage = alt;
+                stage = surface + AabbFaceOutwardNormal(box, surface) * 1.25;
+            }
+            else
+            {
+                // Anchor still inside the world AABB — do not project onto a distant box face.
+                // Nudge a short distance from the work point along a local outward.
+                Vector3D push = anchor - box.Center;
+                if (push.LengthSquared() < 0.01)
+                    push = anchor - from;
+                if (push.LengthSquared() < 0.01)
+                    push = grid.WorldMatrix.Forward;
+                push.Normalize();
+                stage = anchor + push * 1.25;
             }
 
-            // Extra push outward from center so we are clearly clear of the hull.
-            Vector3D outward = stage - box.Center;
-            if (outward.LengthSquared() > 0.01)
-            {
-                outward.Normalize();
-                stage += outward * 1.5;
-            }
+            // Never unstuck across the whole ship bounds — stay by the work point.
+            const double maxFromAnchor = 3.0;
+            Vector3D delta = stage - anchor;
+            double dLen = delta.Length();
+            if (dLen > maxFromAnchor)
+                stage = anchor + delta * (maxFromAnchor / dLen);
 
             try
             {
@@ -1623,6 +1726,7 @@ namespace HireCrew
 
             // Jetpack + Flying pose for EVA theater (position is still scripted).
             CrewAmbientPresence.SetCharacterJetpack(character, true);
+            CrewAmbientPresence.ApplyCrewInvulnerability(character);
             BindEvaPhysics(character, grid);
 
             if (m != null)
@@ -2098,10 +2202,40 @@ namespace HireCrew
             return false;
         }
 
+        /// <summary>
+        /// Inventories on the host grid plus physically connected grids that share ownership
+        /// (connectors / landing gear / mechanical links) so docked ships can use base cargo.
+        /// </summary>
         private static void CollectGridInventories(IMyCubeGrid grid, List<IMyInventory> into)
         {
             into.Clear();
             if (grid == null) return;
+
+            GridGroupScratch.Clear();
+            try
+            {
+                MyAPIGateway.GridGroups.GetGroup(grid, GridLinkTypeEnum.Physical, GridGroupScratch);
+            }
+            catch
+            {
+                GridGroupScratch.Clear();
+            }
+            if (GridGroupScratch.Count == 0)
+                GridGroupScratch.Add(grid);
+
+            for (int g = 0; g < GridGroupScratch.Count; g++)
+            {
+                var other = GridGroupScratch[g];
+                if (other == null || other.Closed)
+                    continue;
+                if (other != grid && !GridsShareCargoAccess(grid, other))
+                    continue;
+                AppendGridInventories(other, into);
+            }
+        }
+
+        private static void AppendGridInventories(IMyCubeGrid grid, List<IMyInventory> into)
+        {
             BlockScratch.Clear();
             grid.GetBlocks(BlockScratch);
             for (int i = 0; i < BlockScratch.Count; i++)
@@ -2123,6 +2257,46 @@ namespace HireCrew
                     catch { }
                 }
             }
+        }
+
+        private static bool GridsShareCargoAccess(IMyCubeGrid a, IMyCubeGrid b)
+        {
+            if (a == null || b == null) return false;
+            try
+            {
+                if (a.IsSameConstructAs(b))
+                    return true;
+            }
+            catch { }
+
+            long ownerA = PrimaryOwner(a);
+            long ownerB = PrimaryOwner(b);
+            if (ownerA != 0 && ownerA == ownerB)
+                return true;
+            if (ownerA == 0 || ownerB == 0)
+                return false;
+
+            try
+            {
+                var f1 = MyAPIGateway.Session.Factions.TryGetPlayerFaction(ownerA);
+                var f2 = MyAPIGateway.Session.Factions.TryGetPlayerFaction(ownerB);
+                if (f1 != null && f2 != null && f1.FactionId == f2.FactionId)
+                    return true;
+            }
+            catch { }
+            return false;
+        }
+
+        private static long PrimaryOwner(IMyCubeGrid grid)
+        {
+            try
+            {
+                var owners = grid.BigOwners;
+                if (owners != null && owners.Count > 0)
+                    return owners[0];
+            }
+            catch { }
+            return 0;
         }
 
         private static IMyInventory FindFeederInventory(

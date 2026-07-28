@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using RichHudFramework.Client;
 using RichHudFramework.UI.Client;
 using Sandbox.ModAPI;
@@ -11,6 +12,7 @@ namespace HireCrew
     /// <summary>
     /// Client crew UI via Rich HUD Framework.
     /// /crew — toggle management UI (assign/dismiss)
+    /// /crew hud — toggle construction status sidebar
     /// Cockpit terminal button / toolbar action — same
     /// /hirecrew (/hc) — admin commands (server-authoritative)
     /// Hire desk block opens the larger hiring UI.
@@ -22,8 +24,10 @@ namespace HireCrew
         public const string AdminAlias = "/hc";
 
         private readonly CrewHudModel _model = new CrewHudModel();
+        private readonly CrewStatusHudModel _statusModel = new CrewStatusHudModel();
         private CrewHudWindow _window;
         private CrewHireWindow _hireWindow;
+        private CrewStatusSidebar _statusSidebar;
         private bool _rhfReady;
         private bool _chatRegistered;
         private int _refreshCooldown;
@@ -61,6 +65,8 @@ namespace HireCrew
                 _hireWindow = new CrewHireWindow(HudMain.Root);
                 _hireWindow.CloseRequested += CloseHireUi;
             }
+            if (_statusSidebar == null)
+                _statusSidebar = new CrewStatusSidebar(HudMain.Root);
             CrewAmbientNameplates.SetReady(true);
         }
 
@@ -70,6 +76,7 @@ namespace HireCrew
             _rhfReady = false;
             _window = null;
             _hireWindow = null;
+            _statusSidebar = null;
             _model.Close();
             _openHireBlockId = 0;
         }
@@ -80,8 +87,11 @@ namespace HireCrew
             CloseUi();
             CloseHireUi();
             UnregisterChat();
+            if (_statusSidebar != null)
+                _statusSidebar.Apply(null, 0, false);
             _window = null;
             _hireWindow = null;
+            _statusSidebar = null;
             _rhfReady = false;
             _model.Close();
         }
@@ -106,6 +116,8 @@ namespace HireCrew
                     _hireWindow.UpdateOpen();
             }
 
+            UpdateStatusSidebar();
+
             if (!_model.IsOpen) return;
 
             if (_model.HasManagedGrid)
@@ -127,6 +139,48 @@ namespace HireCrew
                 if (_window != null)
                     _window.Refresh();
             }
+        }
+
+        private void UpdateStatusSidebar()
+        {
+            if (_statusSidebar == null || !_rhfReady) return;
+
+            if (!_statusModel.SidebarEnabled)
+            {
+                _statusSidebar.Apply(null, 0, false);
+                return;
+            }
+
+            var session = CrewSession.Instance;
+            IMyCubeGrid grid;
+            string err;
+            if (session == null || !session.TryGetLocalManagedGrid(out grid, out err) || grid == null)
+            {
+                _statusSidebar.Apply(null, 0, false);
+                return;
+            }
+
+            IList<RepairMissionSnapshotEntry> repairEntries;
+            IList<SalvageMissionSnapshotEntry> salvageEntries;
+            if (MyAPIGateway.Multiplayer.IsServer)
+            {
+                var repairBuf = new List<RepairMissionSnapshotEntry>();
+                var salvageBuf = new List<SalvageMissionSnapshotEntry>();
+                CrewRepairMission.CollectActiveSnapshots(repairBuf);
+                CrewSalvageMission.CollectActiveSnapshots(salvageBuf);
+                repairEntries = repairBuf;
+                salvageEntries = salvageBuf;
+            }
+            else
+            {
+                repairEntries = session.ClientRepairMissions;
+                salvageEntries = session.ClientSalvageMissions;
+            }
+
+            int overflow;
+            var rows = CrewStatusHudModel.BuildRows(
+                repairEntries, salvageEntries, grid.EntityId, out overflow);
+            _statusSidebar.Apply(rows, overflow, rows.Count > 0);
         }
 
         public void OpenHireDesk(long blockEntityId)
@@ -209,7 +263,13 @@ namespace HireCrew
                         HandleCrewPath(tokens);
                         return;
                     }
-                    Tell("Usage: /crew | /crew path [start|undo|done|clear|stop]");
+                    if (string.Equals(tokens[1], "hud", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _statusModel.ToggleSidebar();
+                        Tell(_statusModel.SidebarEnabled ? "Crew status HUD on" : "Crew status HUD off");
+                        return;
+                    }
+                    Tell("Usage: /crew | /crew hud | /crew path [start|undo|done|clear|stop]");
                     return;
                 }
 

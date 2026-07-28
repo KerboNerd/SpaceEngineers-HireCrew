@@ -123,13 +123,32 @@ public class CrewConfigTests
     }
 
     [Fact]
+    public void Body_loss_on_mission_is_not_permanent_hire_loss()
+    {
+        Assert.False(CrewConfig.PermanentLossOnUnexpectedBodyGone(onMission: true));
+        Assert.True(CrewConfig.PermanentLossOnUnexpectedBodyGone(onMission: false));
+    }
+
+    [Fact]
     public void ClampRole_accepts_new_roles()
     {
         Assert.Equal(CrewRole.Propulsion, CrewConfig.ClampRole((int)CrewRole.Propulsion));
         Assert.Equal(CrewRole.Gunner, CrewConfig.ClampRole(-1));
-        Assert.Equal(CrewRole.DamageControl, CrewConfig.ClampRole(999));
+        Assert.Equal(CrewRole.SalvageOps, CrewConfig.ClampRole(999));
         Assert.Equal("Construction", CrewConfig.RoleLabel(CrewRole.DamageControl));
+        Assert.Equal("Salvage Ops", CrewConfig.RoleLabel(CrewRole.SalvageOps));
         Assert.False(CrewConfig.NeedsWeapon(CrewRole.DamageControl));
+        Assert.False(CrewConfig.NeedsWeapon(CrewRole.SalvageOps));
+    }
+
+    [Fact]
+    public void Salvage_rate_helpers_scale_with_stars()
+    {
+        Assert.True(CrewConfig.GetSalvageGrindMountPerSecond(0)
+            < CrewConfig.GetSalvageGrindMountPerSecond(5));
+        Assert.True(CrewConfig.GetSalvageEvaSpeedMeters(0)
+            < CrewConfig.GetSalvageEvaSpeedMeters(5));
+        Assert.Equal(2000f, CrewConfig.SalvageScanRadiusMeters);
     }
 
     [Fact]
@@ -185,5 +204,14 @@ public class CrewConfigTests
         };
         float mult = CrewConfig.GetSeatedRoleMultiplier(crew, CrewRole.Propulsion);
         Assert.InRange(mult, 1f, CrewConfig.ThrustMultiplierCap + 0.0001f);
+    }
+
+    [Fact]
+    public void RepairEvaSpeed_Increases_By_Stars()
+    {
+        Assert.True(CrewConfig.GetRepairEvaSpeedMeters(0) < CrewConfig.GetRepairEvaSpeedMeters(2));
+        Assert.True(CrewConfig.GetRepairEvaSpeedMeters(2) < CrewConfig.GetRepairEvaSpeedMeters(5));
+        Assert.Equal(CrewConfig.RepairEvaSpeedMeters * 0.75f, CrewConfig.GetRepairEvaSpeedMeters(0), 3);
+        Assert.Equal(CrewConfig.RepairEvaSpeedMeters * 1.25f, CrewConfig.GetRepairEvaSpeedMeters(5), 3);
     }
 }

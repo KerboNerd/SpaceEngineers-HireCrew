@@ -18,6 +18,9 @@
     <Compile Include="..\..\Data\Scripts\HireCrew\CrewHirePool.cs" Link="CrewHirePool.cs" />
     <Compile Include="..\..\Data\Scripts\HireCrew\CrewAmenities.cs" Link="CrewAmenities.cs" />
     <Compile Include="..\..\Data\Scripts\HireCrew\CrewOwnership.cs" Link="CrewOwnership.cs" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\CrewBotRelations.cs" Link="CrewBotRelations.cs" />
     <Compile Include="..\..\Data\Scripts\HireCrew\CrewHudModel.cs" Link="CrewHudModel.cs" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\CrewStatusHudModel.cs" Link="CrewStatusHudModel.cs" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\CrewSalvageRules.cs" Link="CrewSalvageRules.cs" />
   </ItemGroup>
 </Project>

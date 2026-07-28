@@ -22,6 +22,9 @@ namespace HireCrew
         public const ushort AdminCommandMsg = 41745;
         public const ushort PathEditMsg = 41746;
         public const ushort RepairDispatchMsg = 41747;
+        public const ushort RepairMissionSyncMsg = 41748;
+        public const ushort SalvageDispatchMsg = 41749;
+        public const ushort SalvageMissionSyncMsg = 41750;
 
         public static void Register(Action<ushort, byte[], ulong, bool> handler)
         {
@@ -42,6 +45,9 @@ namespace HireCrew
             MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(AdminCommandMsg, handler);
             MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(PathEditMsg, handler);
             MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(RepairDispatchMsg, handler);
+            MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(RepairMissionSyncMsg, handler);
+            MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(SalvageDispatchMsg, handler);
+            MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(SalvageMissionSyncMsg, handler);
         }
 
         public static void Unregister(Action<ushort, byte[], ulong, bool> handler)
@@ -63,6 +69,9 @@ namespace HireCrew
             MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(AdminCommandMsg, handler);
             MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(PathEditMsg, handler);
             MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(RepairDispatchMsg, handler);
+            MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(RepairMissionSyncMsg, handler);
+            MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(SalvageDispatchMsg, handler);
+            MyAPIGateway.Multiplayer.UnregisterSecureMessageHandler(SalvageMissionSyncMsg, handler);
         }
 
         public static byte[] Serialize<T>(T obj)

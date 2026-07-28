@@ -131,7 +131,8 @@ namespace HireCrew
                     continue;
                 if (crew.Status != CrewStatus.Seated || !crew.CharacterEntityId.HasValue)
                     continue;
-                if (CrewRepairMission.IsCrewOnMission(crew.CrewId))
+                if (CrewRepairMission.IsCrewOnMission(crew.CrewId)
+                    || CrewSalvageMission.IsCrewOnMission(crew.CrewId))
                     continue;
 
                 AmbientRuntime runtime;
@@ -248,22 +249,38 @@ namespace HireCrew
 
                 IMyCharacter character;
                 bool hasLive = TryGetLiveCharacter(crew, out character);
+                bool onMission = CrewRepairMission.IsCrewOnMission(crew.CrewId)
+                    || CrewSalvageMission.IsCrewOnMission(crew.CrewId);
                 // Unexpected body loss (player kill / world removal) — permanent crew loss.
                 // Intentional DespawnBot clears CharacterEntityId first, so it never hits this path.
+                // Mid-sortie EVA clip/vanish: clear body and respawn — keep the hire.
                 if (crew.CharacterEntityId.HasValue && !hasLive)
                 {
-                    session.HandleCrewBotKilled(crew);
+                    if (CrewConfig.PermanentLossOnUnexpectedBodyGone(onMission))
+                        session.HandleCrewBotKilled(crew);
+                    else
+                    {
+                        Log("mission body gone — respawn crew=" + crew.CrewId);
+                        DespawnBot(session, crew, dirtyGrids);
+                    }
                     ClearCrewRuntime(crew.CrewId);
                     continue;
                 }
                 if (hasLive && IsBotDead(character))
                 {
-                    session.HandleCrewBotKilled(crew);
-                    ClearCrewRuntime(crew.CrewId);
+                    if (CrewConfig.PermanentLossOnUnexpectedBodyGone(onMission))
+                    {
+                        session.HandleCrewBotKilled(crew);
+                        ClearCrewRuntime(crew.CrewId);
+                    }
+                    else
+                    {
+                        Log("mission body dead — despawn/respawn crew=" + crew.CrewId);
+                        DespawnBot(session, crew, dirtyGrids);
+                        ClearCrewRuntime(crew.CrewId);
+                    }
                     continue;
                 }
-
-                bool onMission = CrewRepairMission.IsCrewOnMission(crew.CrewId);
 
                 // Ambient presence is station/parked only — despawn while the grid is under way.
                 // Active EVA sorties keep their bodies (mission will recall/abort if needed).
@@ -1397,7 +1414,8 @@ namespace HireCrew
             HashSet<long> dirtyGrids)
         {
             Vector3D pos, forward, up;
-            if (!CrewRepairMission.TryGetMissionPose(crew.CrewId, seat, out pos, out forward, out up))
+            if (!CrewRepairMission.TryGetMissionPose(crew.CrewId, seat, out pos, out forward, out up)
+                && !CrewSalvageMission.TryGetMissionPose(crew.CrewId, seat, out pos, out forward, out up))
                 GetAmbientSpawnPose(seat, out pos, out forward, out up);
             string botName = AmbientDisplayName(crew);
 
@@ -1437,7 +1455,7 @@ namespace HireCrew
             {
                 // AiEnabled pattern: OB character + harvested IsBot EntityController (TakeControl).
                 // Plain OB without controller = disconnected HUD icon + no walk anim.
-                character = TrySpawnCharacterEntity(pos, forward, up, botName, seat, crew.CrewId);
+                character = TrySpawnCharacterEntity(pos, forward, up, botName, seat, crew);
                 spawnPath = "Controlled/" + CrewConfig.AmbientCharacterSubtype;
             }
 
@@ -1449,6 +1467,8 @@ namespace HireCrew
             }
 
             ApplyAmbientPhysics(character, seat.CubeGrid);
+            ApplyCrewInvulnerability(character);
+            AlignCrewBotToOwner(character, crew);
             AlignCharacterToLocalDown(character, seat);
             SnapFeetToDeck(character, seat);
             ForceStandingPose(character);
@@ -1488,8 +1508,9 @@ namespace HireCrew
             Vector3D up,
             string displayName,
             IMyTerminalBlock seat,
-            string crewId)
+            CrewRecord crew)
         {
+            string crewId = crew != null ? crew.CrewId : null;
             // Require a harvested IsBot controller before the body exists — uncontrolled OB
             // characters briefly show the disconnected-player HUD icon.
             var control = CrewBotControllers.Take();
@@ -1516,6 +1537,10 @@ namespace HireCrew
             if (forward.LengthSquared() < 0.01)
                 forward = Vector3D.CalculatePerpendicularVector(up);
 
+            long ownerIdentityId = CrewBotRelations.ResolveCharacterOwnerIdentityId(
+                crew, control.Identity.IdentityId);
+            CrewBotControllers.AlignToCrewOwner(control.Identity.IdentityId, crew);
+
             var matrix = MatrixD.CreateWorld(pos, forward, up);
             var po = new MyPositionAndOrientation(ref matrix);
             var ob = new MyObjectBuilder_Character
@@ -1538,8 +1563,10 @@ namespace HireCrew
                 PersistentFlags = MyPersistentEntityFlags2.InScene | MyPersistentEntityFlags2.Enabled,
                 PositionAndOrientation = po,
                 Health = 1000,
+                CharacterGeneralDamageModifier = 0f,
                 LightEnabled = false,
-                OwningPlayerIdentityId = control.Identity.IdentityId,
+                // Hire player ownership so factionless owners' weapons stay friendly.
+                OwningPlayerIdentityId = ownerIdentityId,
             };
 
             if (seat != null && seat.CubeGrid != null)
@@ -1601,10 +1628,12 @@ namespace HireCrew
                 if (seat != null && seat.CubeGrid != null)
                     ApplyAmbientPhysics(character, seat.CubeGrid);
 
+                ApplyCrewInvulnerability(character);
                 ApplyAmbientNameplate(character, displayName);
 
                 Log("character OB+control ok " + displayName + " char=" + character.EntityId
                     + " ident=" + control.Identity.IdentityId
+                    + " owner=" + ownerIdentityId
                     + " pool=" + CrewBotControllers.PoolCount);
                 return character;
             }
@@ -1614,6 +1643,45 @@ namespace HireCrew
                 Log("character OB spawn threw for " + displayName + ": " + e.Message);
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Align SpawnBot-path identities (and any controlling identity) to the hiring owner.
+        /// Controlled OB path also calls this via AlignToCrewOwner before TakeControl.
+        /// </summary>
+        private static void AlignCrewBotToOwner(IMyCharacter character, CrewRecord crew)
+        {
+            if (character == null || character.Closed || crew == null)
+                return;
+
+            long botIdentityId = 0;
+            try
+            {
+                if (character.ControllerInfo != null && character.ControllerInfo.ControllingIdentityId != 0)
+                    botIdentityId = character.ControllerInfo.ControllingIdentityId;
+            }
+            catch { }
+
+            if (botIdentityId == 0)
+            {
+                try
+                {
+                    PlayerScratch.Clear();
+                    MyAPIGateway.Players.GetPlayers(PlayerScratch);
+                    for (int i = 0; i < PlayerScratch.Count; i++)
+                    {
+                        var p = PlayerScratch[i];
+                        if (p == null || p.Character == null || p.Character.EntityId != character.EntityId)
+                            continue;
+                        botIdentityId = p.IdentityId;
+                        break;
+                    }
+                }
+                catch { }
+            }
+
+            if (botIdentityId != 0)
+                CrewBotControllers.AlignToCrewOwner(botIdentityId, crew);
         }
 
         private static string AmbientDisplayName(CrewRecord crew)
@@ -1676,6 +1744,7 @@ namespace HireCrew
 
                 try
                 {
+                    CrewBotControllers.AlignToCrewOwner(control.Identity.IdentityId, crew);
                     control.Controller.TakeControl(character);
                     ControlByCrewId[crew.CrewId] = control;
                     Log("late TakeControl ok " + crew.CrewId
@@ -2116,6 +2185,28 @@ namespace HireCrew
                 if (ctrl != null && ctrl.EnabledThrusts != enabled)
                     ctrl.SwitchThrusts();
             }
+            catch { }
+        }
+
+        /// <summary>
+        /// WeaponCore omits entities with this private bit from its target database
+        /// (AiDatabase / WeaponTracking). Not a named Keen EntityFlags value.
+        /// </summary>
+        private const EntityFlags WeaponCoreIgnoreTargetFlag = (EntityFlags)0x20000000;
+
+        /// <summary>
+        /// Zero damage modifier so OB/fallback astronauts survive EVA hull clips,
+        /// and mark the body ignored by WeaponCore targeting (faction alone is not enough:
+        /// WC uses MyIDModule.Owner / ControllingIdentityId, which stay on the bot identity).
+        /// HireCrew_Crew SpawnBot also sets Invulnerable in Bots.sbc.
+        /// </summary>
+        public static void ApplyCrewInvulnerability(IMyCharacter character)
+        {
+            if (character == null || character.Closed)
+                return;
+            try { character.CharacterGeneralDamageModifier = 0f; }
+            catch { }
+            try { character.Flags |= WeaponCoreIgnoreTargetFlag; }
             catch { }
         }
 

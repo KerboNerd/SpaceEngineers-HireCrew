@@ -15,5 +15,6 @@ tools/texconv/
 
 # Local agent / OS junk
 .superpowers/
+.wiki/
 Thumbs.db
 Desktop.ini

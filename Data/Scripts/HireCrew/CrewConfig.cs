@@ -103,7 +103,7 @@ namespace HireCrew
             }
         }
 
-        public const int MaxRole = (int)CrewRole.DamageControl;
+        public const int MaxRole = (int)CrewRole.SalvageOps;
 
         /// <summary>Base hire prices by star rating (before per-candidate variance).</summary>
         public static long[] PriceByStars
@@ -176,6 +176,14 @@ namespace HireCrew
         /// <summary>Character definition used when SpawnBot fails (common in space).</summary>
         public const string AmbientCharacterSubtype = "NPC_Astronaut";
         /// <summary>
+        /// Unexpected ambient body loss (player kill / world removal) permanently fires the hire,
+        /// except during Construction EVA where theater clip deaths must not delete the crew.
+        /// </summary>
+        public static bool PermanentLossOnUnexpectedBodyGone(bool onMission)
+        {
+            return !onMission;
+        }
+        /// <summary>
         /// Scripted AttachPilot bypasses vanilla SitInSeat(duration), so HireCrew drives
         /// sit/stand cycles. Seconds seated before RemovePilot (min/max inclusive).
         /// </summary>
@@ -202,7 +210,15 @@ namespace HireCrew
         /// <summary>How often to scan grids for new Damage Control sorties.</summary>
         public const float RepairMissionScanSeconds = 0.35f;
         public const float RepairEvaStandOffMeters = 4.0f;
+        /// <summary>Base EVA flight speed (m/s) at reference scale; scaled by GetRepairEvaSpeedMeters.</summary>
         public const float RepairEvaSpeedMeters = 9f;
+
+        /// <summary>0★ → 0.75× base, 5★ → 1.25× base.</summary>
+        public static float GetRepairEvaSpeedMeters(int stars)
+        {
+            return RepairEvaSpeedMeters * (0.75f + 0.1f * ClampStars(stars));
+        }
+
         /// <summary>How quickly EVA speed can change (m/s²) — lower = softer turns.</summary>
         public const float RepairEvaAccelMeters = 6f;
         /// <summary>How quickly body yaw follows flight heading (blend rate).</summary>
@@ -210,6 +226,31 @@ namespace HireCrew
         public const float RepairEvaArriveMeters = 1.5f;
         /// <summary>Can weld any damaged block within this range (no need to enter the block).</summary>
         public const float RepairWeldRangeMeters = 5f;
+
+        // Salvage Ops EVA grind.
+        public const float SalvageScanRadiusMeters = 2000f;
+        public const float SalvageGrindRangeMeters = 5f;
+        public const float SalvageEvaStandOffMeters = 4f;
+        public const float SalvageEvaSpeedMeters = 9f;
+        public const float SalvageEvaAccelMeters = 6f;
+        public const float SalvageEvaTurnRate = 3.5f;
+        public const float SalvageEvaArriveMeters = 1.5f;
+        /// <summary>0 = unlimited parallel salvage sorties per home grid.</summary>
+        public const int SalvageMaxParallelPerGrid = 0;
+        /// <summary>Base Keen grinder-seconds applied per real second at 0★.</summary>
+        public const float SalvageGrindMountPerSecondBase = 0.35f;
+
+        /// <summary>0★ → 0.75× base, 5★ → 1.25× base.</summary>
+        public static float GetSalvageGrindMountPerSecond(int stars)
+        {
+            return SalvageGrindMountPerSecondBase * (0.75f + 0.1f * ClampStars(stars));
+        }
+
+        /// <summary>0★ → 0.75× base, 5★ → 1.25× base.</summary>
+        public static float GetSalvageEvaSpeedMeters(int stars)
+        {
+            return SalvageEvaSpeedMeters * (0.75f + 0.1f * ClampStars(stars));
+        }
         public const float RepairStuckSeconds = 2.2f;
         public const float RepairStuckMoveMeters = 0.2f;
         public const float RepairWaypointArriveMeters = 1.25f;
@@ -343,6 +384,7 @@ namespace HireCrew
                 case CrewRole.Propulsion: return "Propulsion Tech";
                 case CrewRole.Quartermaster: return "Quartermaster";
                 case CrewRole.DamageControl: return "Construction";
+                case CrewRole.SalvageOps: return "Salvage Ops";
                 default: return "Gunner";
             }
         }

@@ -119,7 +119,117 @@ namespace HireCrew
         {
             if (info == null || info.Controller == null || info.Identity == null)
                 return;
+            // Drop any owner-faction membership before the identity re-enters the pool.
+            ClearFaction(info.Identity.IdentityId);
             Pool.Add(info);
+        }
+
+        /// <summary>
+        /// Join the harvested bot identity to the crew owner's faction so own-ship weapons
+        /// (WeaponCore uses ControllingIdentityId) treat crew as friendly. Factionless
+        /// owners get bots in the HireCrew NPC faction with max player reputation.
+        /// </summary>
+        public static void AlignToCrewOwner(long botIdentityId, CrewRecord crew)
+        {
+            if (botIdentityId == 0 || crew == null)
+                return;
+            if (MyAPIGateway.Session == null || MyAPIGateway.Session.Factions == null)
+                return;
+
+            long factionId = CrewBotRelations.ResolveFriendlyFactionId(
+                crew,
+                id =>
+                {
+                    var fac = MyAPIGateway.Session.Factions.TryGetPlayerFaction(id);
+                    return fac != null ? fac.FactionId : 0L;
+                });
+            bool fallback = CrewBotRelations.NeedsFallbackFriendlyFaction(factionId);
+            if (fallback)
+            {
+                factionId = EnsureAmbientFriendlyFactionId();
+                if (factionId == 0)
+                    return;
+            }
+
+            try
+            {
+                var current = MyAPIGateway.Session.Factions.TryGetPlayerFaction(botIdentityId);
+                if (current != null && current.FactionId != factionId)
+                    MyAPIGateway.Session.Factions.KickMember(current.FactionId, botIdentityId);
+
+                var target = MyAPIGateway.Session.Factions.TryGetFactionById(factionId);
+                if (target == null)
+                    return;
+
+                if (!target.IsMember(botIdentityId))
+                {
+                    MyAPIGateway.Session.Factions.AddPlayerToFaction(botIdentityId, factionId);
+                    // Some worlds reject direct Add for bot identities — join+accept fallback.
+                    if (!target.IsMember(botIdentityId))
+                    {
+                        MyAPIGateway.Session.Factions.SendJoinRequest(factionId, botIdentityId);
+                        MyAPIGateway.Session.Factions.AcceptJoin(factionId, botIdentityId);
+                    }
+                }
+
+                if (fallback && crew.OwnerIdentityId != 0)
+                {
+                    MyAPIGateway.Session.Factions.SetReputationBetweenPlayerAndFaction(
+                        crew.OwnerIdentityId,
+                        factionId,
+                        CrewBotRelations.FriendlyReputation);
+                }
+
+                Log("aligned bot=" + botIdentityId
+                    + " faction=" + factionId
+                    + " member=" + target.IsMember(botIdentityId)
+                    + " fallback=" + fallback);
+            }
+            catch (Exception e)
+            {
+                Log("AlignToCrewOwner failed id=" + botIdentityId + ": " + e.Message);
+            }
+        }
+
+        private static long EnsureAmbientFriendlyFactionId()
+        {
+            try
+            {
+                var existing = MyAPIGateway.Session.Factions.TryGetFactionByTag(
+                    CrewBotRelations.AmbientFriendlyFactionTag);
+                if (existing != null)
+                    return existing.FactionId;
+
+                MyAPIGateway.Session.Factions.CreateNPCFaction(
+                    CrewBotRelations.AmbientFriendlyFactionTag,
+                    CrewBotRelations.AmbientFriendlyFactionName,
+                    "HireCrew ambient crew",
+                    "");
+
+                existing = MyAPIGateway.Session.Factions.TryGetFactionByTag(
+                    CrewBotRelations.AmbientFriendlyFactionTag);
+                return existing != null ? existing.FactionId : 0L;
+            }
+            catch (Exception e)
+            {
+                Log("EnsureAmbientFriendlyFaction failed: " + e.Message);
+                return 0;
+            }
+        }
+
+        public static void ClearFaction(long botIdentityId)
+        {
+            if (botIdentityId == 0)
+                return;
+            if (MyAPIGateway.Session == null || MyAPIGateway.Session.Factions == null)
+                return;
+            try
+            {
+                var fac = MyAPIGateway.Session.Factions.TryGetPlayerFaction(botIdentityId);
+                if (fac != null)
+                    MyAPIGateway.Session.Factions.KickMember(fac.FactionId, botIdentityId);
+            }
+            catch { }
         }
 
         private static void EnsureHarvestPosition()
@@ -193,14 +303,8 @@ namespace HireCrew
                 if (!PendingHarvestEntityIds.Remove(player.Character.EntityId))
                     continue;
 
-                // Kick dummy out of any auto-joined faction (AiEnabled).
-                try
-                {
-                    var fac = MyAPIGateway.Session.Factions.TryGetPlayerFaction(player.IdentityId);
-                    if (fac != null)
-                        MyAPIGateway.Session.Factions.KickMember(fac.FactionId, player.IdentityId);
-                }
-                catch { }
+                // Kick dummy out of any auto-joined faction until assigned to a crew owner.
+                ClearFaction(player.IdentityId);
 
                 Pool.Add(new ControlInfo
                 {

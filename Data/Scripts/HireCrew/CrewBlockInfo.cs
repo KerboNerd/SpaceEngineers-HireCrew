@@ -198,6 +198,10 @@ namespace HireCrew
             {
                 sb.AppendLine("Job: EVA weld / project — Send from HUD");
             }
+            else if (crew.Role == CrewRole.SalvageOps)
+            {
+                sb.AppendLine("Job: Manual EVA salvage — pick a grid from HUD");
+            }
             else
             {
                 sb.AppendLine("Weapon: " + weaponName);

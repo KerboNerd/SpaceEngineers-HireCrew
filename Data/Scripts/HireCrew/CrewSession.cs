@@ -26,6 +26,13 @@ namespace HireCrew
         private readonly Random _hireRng = new Random();
         private CrewHud _hud;
         private CrewBlockInfo _blockInfo;
+        private readonly List<RepairMissionSnapshotEntry> _clientRepairMissions = new List<RepairMissionSnapshotEntry>();
+        private readonly List<RepairMissionSnapshotEntry> _repairMissionSyncBuf = new List<RepairMissionSnapshotEntry>();
+        private readonly List<SalvageMissionSnapshotEntry> _clientSalvageMissions = new List<SalvageMissionSnapshotEntry>();
+        private readonly List<SalvageMissionSnapshotEntry> _salvageMissionSyncBuf = new List<SalvageMissionSnapshotEntry>();
+
+        public IList<RepairMissionSnapshotEntry> ClientRepairMissions { get { return _clientRepairMissions; } }
+        public IList<SalvageMissionSnapshotEntry> ClientSalvageMissions { get { return _clientSalvageMissions; } }
 
         public override void LoadData()
         {
@@ -231,6 +238,7 @@ namespace HireCrew
                 CrewAmbientPresence.DespawnAll(this);
             CrewAmbientPresence.ClearRuntime();
             CrewRepairMission.ClearAll();
+            CrewSalvageMission.ClearAll();
             if (WeaponAi != null) WeaponAi.Unload();
             WeaponAi = null;
             PowerBuff = null;
@@ -306,6 +314,7 @@ namespace HireCrew
             // Wander steering must run every frame; spawn/lifecycle stays ~1 Hz.
             CrewAmbientPresence.UpdateMovement(this);
             CrewRepairMission.UpdateMovement(this);
+            CrewSalvageMission.UpdateMovement(this);
             // Harvest dummy bot controllers often (AiEnabled pattern) so ambient NPCs can TakeControl.
             if (_tick % 5 == 0)
                 CrewBotControllers.Tick();
@@ -316,10 +325,81 @@ namespace HireCrew
             WatchCrewIntegrity();
             CrewAmbientPresence.Tick(this);
             CrewRepairMission.Tick(this);
+            CrewSalvageMission.Tick(this);
+            TickRepairMissionSync();
+            TickSalvageMissionSync();
             RefreshAllGridBuffs();
             if (HirePools != null && HirePools.TickRefresh(DateTime.UtcNow, _hireRng))
             {
                 // Clients pull on open; no broadcast storm.
+            }
+        }
+
+        private void TickRepairMissionSync()
+        {
+            if (!MyAPIGateway.Multiplayer.IsServer) return;
+
+            CrewRepairMission.CollectActiveSnapshots(_repairMissionSyncBuf);
+
+            if (!MyAPIGateway.Utilities.IsDedicated)
+            {
+                _clientRepairMissions.Clear();
+                for (int i = 0; i < _repairMissionSyncBuf.Count; i++)
+                    _clientRepairMissions.Add(_repairMissionSyncBuf[i]);
+            }
+
+            var sync = new RepairMissionSync
+            {
+                Entries = new List<RepairMissionSnapshotEntry>(_repairMissionSyncBuf)
+            };
+            byte[] data = CrewNetworking.Serialize(sync);
+
+            var players = new List<IMyPlayer>();
+            MyAPIGateway.Players.GetPlayers(players);
+            ulong localSteam = MyAPIGateway.Multiplayer.MyId;
+            for (int i = 0; i < players.Count; i++)
+            {
+                var p = players[i];
+                if (p == null) continue;
+                ulong steam = p.SteamUserId;
+                if (steam == 0) continue;
+                if (!MyAPIGateway.Utilities.IsDedicated && steam == localSteam)
+                    continue;
+                CrewNetworking.SendToPlayer(CrewNetworking.RepairMissionSyncMsg, data, steam);
+            }
+        }
+
+        private void TickSalvageMissionSync()
+        {
+            if (!MyAPIGateway.Multiplayer.IsServer) return;
+
+            CrewSalvageMission.CollectActiveSnapshots(_salvageMissionSyncBuf);
+
+            if (!MyAPIGateway.Utilities.IsDedicated)
+            {
+                _clientSalvageMissions.Clear();
+                for (int i = 0; i < _salvageMissionSyncBuf.Count; i++)
+                    _clientSalvageMissions.Add(_salvageMissionSyncBuf[i]);
+            }
+
+            var sync = new SalvageMissionSync
+            {
+                Entries = new List<SalvageMissionSnapshotEntry>(_salvageMissionSyncBuf)
+            };
+            byte[] data = CrewNetworking.Serialize(sync);
+
+            var players = new List<IMyPlayer>();
+            MyAPIGateway.Players.GetPlayers(players);
+            ulong localSteam = MyAPIGateway.Multiplayer.MyId;
+            for (int i = 0; i < players.Count; i++)
+            {
+                var p = players[i];
+                if (p == null) continue;
+                ulong steam = p.SteamUserId;
+                if (steam == 0) continue;
+                if (!MyAPIGateway.Utilities.IsDedicated && steam == localSteam)
+                    continue;
+                CrewNetworking.SendToPlayer(CrewNetworking.SalvageMissionSyncMsg, data, steam);
             }
         }
 
@@ -404,6 +484,38 @@ namespace HireCrew
                 return;
             }
 
+            if (id == CrewNetworking.RepairMissionSyncMsg)
+            {
+                if (MyAPIGateway.Multiplayer.IsServer) return;
+                var sync = CrewNetworking.Deserialize<RepairMissionSync>(data);
+                _clientRepairMissions.Clear();
+                if (sync != null && sync.Entries != null)
+                {
+                    for (int i = 0; i < sync.Entries.Count; i++)
+                    {
+                        if (sync.Entries[i] != null)
+                            _clientRepairMissions.Add(sync.Entries[i]);
+                    }
+                }
+                return;
+            }
+
+            if (id == CrewNetworking.SalvageMissionSyncMsg)
+            {
+                if (MyAPIGateway.Multiplayer.IsServer) return;
+                var sync = CrewNetworking.Deserialize<SalvageMissionSync>(data);
+                _clientSalvageMissions.Clear();
+                if (sync != null && sync.Entries != null)
+                {
+                    for (int i = 0; i < sync.Entries.Count; i++)
+                    {
+                        if (sync.Entries[i] != null)
+                            _clientSalvageMissions.Add(sync.Entries[i]);
+                    }
+                }
+                return;
+            }
+
             if (!MyAPIGateway.Multiplayer.IsServer) return;
 
             var identityId = GetIdentityId(sender);
@@ -435,6 +547,8 @@ namespace HireCrew
                 HandlePathEdit(CrewNetworking.Deserialize<PathEditRequest>(data), identityId, sender);
             else if (id == CrewNetworking.RepairDispatchMsg)
                 HandleRepairDispatch(CrewNetworking.Deserialize<RepairDispatchRequest>(data), identityId, sender);
+            else if (id == CrewNetworking.SalvageDispatchMsg)
+                HandleSalvageDispatch(CrewNetworking.Deserialize<SalvageDispatchRequest>(data), identityId, sender);
         }
 
         public void ClientRequestAdmin(AdminCommandRequest req)
@@ -467,6 +581,68 @@ namespace HireCrew
                 HandleRepairDispatch(req, MyAPIGateway.Session.Player.IdentityId, MyAPIGateway.Multiplayer.MyId);
             else
                 CrewNetworking.SendToServer(CrewNetworking.RepairDispatchMsg, data);
+        }
+
+        public void ClientRequestSalvageDispatch(string crewId, bool recall, long targetGridEntityId)
+        {
+            if (string.IsNullOrEmpty(crewId))
+                return;
+            var req = new SalvageDispatchRequest
+            {
+                CrewId = crewId,
+                Recall = recall,
+                TargetGridEntityId = targetGridEntityId
+            };
+            var data = CrewNetworking.Serialize(req);
+            if (MyAPIGateway.Multiplayer.IsServer)
+                HandleSalvageDispatch(req, MyAPIGateway.Session.Player.IdentityId, MyAPIGateway.Multiplayer.MyId);
+            else
+                CrewNetworking.SendToServer(CrewNetworking.SalvageDispatchMsg, data);
+        }
+
+        private void HandleSalvageDispatch(SalvageDispatchRequest req, long identityId, ulong steamId)
+        {
+            if (req == null || string.IsNullOrEmpty(req.CrewId) || Store == null)
+                return;
+
+            var crew = Store.Get(req.CrewId);
+            if (crew == null || crew.Role != CrewRole.SalvageOps || crew.GridEntityId == 0)
+            {
+                Notify(steamId, "Salvage: crew not ready");
+                return;
+            }
+
+            IMyCubeGrid home;
+            if (!TryGetGrid(crew.GridEntityId, out home) || home == null)
+            {
+                Notify(steamId, "Salvage: grid not found");
+                return;
+            }
+            if (!HasManagePermission(identityId, home))
+            {
+                Notify(steamId, "No permission");
+                return;
+            }
+
+            if (req.Recall)
+            {
+                bool ok = CrewSalvageMission.RecallCrew(crew.CrewId);
+                Notify(steamId, ok
+                    ? "Salvage: recalling " + (crew.DisplayName ?? "salvager")
+                    : "Salvage: not out");
+                return;
+            }
+
+            if (!CrewAmbientPresence.IsGridIdle(home))
+            {
+                Notify(steamId, "Salvage: grid moving — wait");
+                return;
+            }
+
+            bool started = CrewSalvageMission.DispatchCrew(this, crew.CrewId, req.TargetGridEntityId);
+            Notify(steamId, started
+                ? "Salvage: sent " + (crew.DisplayName ?? "salvager")
+                : "Salvage: invalid target / not ready");
         }
 
         private void HandleRepairDispatch(RepairDispatchRequest req, long identityId, ulong steamId)

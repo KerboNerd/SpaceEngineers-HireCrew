@@ -75,6 +75,7 @@ namespace HireCrew
             AddRoleCheckbox(CrewRole.Propulsion, "HireCrew_Role_Propulsion", "Allow Propulsion Tech");
             AddRoleCheckbox(CrewRole.Quartermaster, "HireCrew_Role_Quartermaster", "Allow Quartermaster");
             AddRoleCheckbox(CrewRole.DamageControl, "HireCrew_Role_DamageControl", "Allow Construction");
+            AddRoleCheckbox(CrewRole.SalvageOps, "HireCrew_Role_SalvageOps", "Allow Salvage Ops");
             AddRefillSwitch();
             AddRerollButton();
 
@@ -458,6 +459,7 @@ namespace HireCrew
             if (HireWorldConfig.RoleAllowed(mask, (int)CrewRole.Propulsion)) sb.Append('P');
             if (HireWorldConfig.RoleAllowed(mask, (int)CrewRole.Quartermaster)) sb.Append('Q');
             if (HireWorldConfig.RoleAllowed(mask, (int)CrewRole.DamageControl)) sb.Append('D');
+            if (HireWorldConfig.RoleAllowed(mask, (int)CrewRole.SalvageOps)) sb.Append('S');
             return sb.Length == 0 ? "-" : sb.ToString();
         }
     }

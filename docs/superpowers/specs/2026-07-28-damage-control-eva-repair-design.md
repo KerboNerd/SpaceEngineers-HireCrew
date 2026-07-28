@@ -95,7 +95,7 @@ Exact protobuf field numbers are an implementation detail for the plan.
 | Multiple Damage Control | One EVA; others wait |
 | Ship starts moving | Abort / return (same spirit as ambient idle guard) |
 
-**Stars:** higher stars → faster weld rate (and optionally prefer nearer/more important targets). Not a separate progression system.
+**Stars:** higher stars → faster weld rate and faster EVA flight speed (same 0.75×–1.25× curve; optionally prefer nearer/more important targets). Not a separate progression system.
 
 ## State machine (v1)
 
