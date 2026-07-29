@@ -9,7 +9,7 @@
       </Id>
       <DisplayName>Crew Hiring Desk</DisplayName>
       <Description>Hire randomized crew candidates. Aim at the screen and press F (or use the terminal control). Assign via /crew.</Description>
-      <Icon>Textures\GUI\Icons\Cubes\StoreBlock.dds</Icon>
+      <Icon>Textures\Icons\HC_CrewStation_1.dds</Icon>
       <CubeSize>Large</CubeSize>
       <BlockTopology>TriangleMesh</BlockTopology>
       <Size x="1" y="1" z="1" />
