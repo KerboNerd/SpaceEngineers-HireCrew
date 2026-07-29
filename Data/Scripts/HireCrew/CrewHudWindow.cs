@@ -1187,9 +1187,10 @@ namespace HireCrew
                 return;
 
             bool salvage = crew.Role == CrewRole.SalvageOps;
-            bool onMission = salvage
-                ? CrewSalvageMission.IsCrewOnMission(crew.CrewId)
-                : CrewRepairMission.IsCrewOnMission(crew.CrewId);
+            var session = CrewSession.Instance;
+            bool onMission = session != null && (salvage
+                ? session.IsCrewOnSalvageMission(crew.CrewId)
+                : session.IsCrewOnRepairMission(crew.CrewId));
             bool canSend = !onMission;
             if (canSend)
             {
@@ -1237,7 +1238,7 @@ namespace HireCrew
 
             if (crew.Role == CrewRole.SalvageOps)
             {
-                if (CrewSalvageMission.IsCrewOnMission(crew.CrewId))
+                if (session.IsCrewOnSalvageMission(crew.CrewId))
                 {
                     session.ClientRequestSalvageDispatch(crew.CrewId, true, 0);
                     Refresh();
@@ -1267,7 +1268,7 @@ namespace HireCrew
 
             if (crew.Role != CrewRole.DamageControl)
                 return;
-            bool recall = CrewRepairMission.IsCrewOnMission(crew.CrewId);
+            bool recall = session.IsCrewOnRepairMission(crew.CrewId);
             session.ClientRequestRepairDispatch(crew.CrewId, recall);
             Refresh();
         }

@@ -39,6 +39,43 @@ namespace HireCrew
         public IList<RepairMissionSnapshotEntry> ClientRepairMissions { get { return _clientRepairMissions; } }
         public IList<SalvageMissionSnapshotEntry> ClientSalvageMissions { get { return _clientSalvageMissions; } }
 
+        /// <summary>
+        /// True if Construction crew is on a sortie. Dedicated clients must use synced
+        /// snapshots — server-only <see cref="CrewRepairMission.IsCrewOnMission"/> is empty there.
+        /// </summary>
+        public bool IsCrewOnRepairMission(string crewId)
+        {
+            if (string.IsNullOrEmpty(crewId))
+                return false;
+            if (MyAPIGateway.Multiplayer != null && MyAPIGateway.Multiplayer.IsServer)
+                return CrewRepairMission.IsCrewOnMission(crewId);
+            for (int i = 0; i < _clientRepairMissions.Count; i++)
+            {
+                var e = _clientRepairMissions[i];
+                if (e != null && e.CrewId == crewId)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// True if Salvage Ops crew is on a sortie. Dedicated clients use synced snapshots.
+        /// </summary>
+        public bool IsCrewOnSalvageMission(string crewId)
+        {
+            if (string.IsNullOrEmpty(crewId))
+                return false;
+            if (MyAPIGateway.Multiplayer != null && MyAPIGateway.Multiplayer.IsServer)
+                return CrewSalvageMission.IsCrewOnMission(crewId);
+            for (int i = 0; i < _clientSalvageMissions.Count; i++)
+            {
+                var e = _clientSalvageMissions[i];
+                if (e != null && e.CrewId == crewId)
+                    return true;
+            }
+            return false;
+        }
+
         public override void LoadData()
         {
             Instance = this;
