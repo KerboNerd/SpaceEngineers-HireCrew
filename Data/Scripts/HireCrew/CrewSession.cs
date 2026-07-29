@@ -4,6 +4,7 @@ using Sandbox.ModAPI;
 using VRage.Game.Components;
 using VRage.Game.ModAPI;
 using VRage.ModAPI;
+using VRageMath;
 
 namespace HireCrew
 {
@@ -16,7 +17,11 @@ namespace HireCrew
         public CrewStore Store { get; private set; }
         public HirePoolStore HirePools { get; private set; }
         public RepairPathStore RepairPaths { get; private set; }
+        public SalvageTargetStore SalvageTargets { get; private set; }
         public CrewPowerBuff PowerBuff { get; private set; }
+        private readonly List<SalvageTargetEntry> _salvageTargetSyncBuf = new List<SalvageTargetEntry>();
+        private readonly List<long> _salvageHomeIdScratch = new List<long>(16);
+        private readonly List<IMyCubeGrid> _salvageGridGroupScratch = new List<IMyCubeGrid>(16);
 
         // Same instance required for UnregisterSecureMessageHandler.
         private Action<ushort, byte[], ulong, bool> _messageHandler;
@@ -40,6 +45,7 @@ namespace HireCrew
             Store = new CrewStore();
             HirePools = new HirePoolStore();
             RepairPaths = new RepairPathStore();
+            SalvageTargets = new SalvageTargetStore();
             PowerBuff = new CrewPowerBuff();
             WeaponAi = new WeaponAiBridge();
             WeaponAi.Load();
@@ -95,6 +101,18 @@ namespace HireCrew
                 }
                 catch { }
             }
+
+            if (SalvageTargets != null)
+            {
+                var salvageB64 = Convert.ToBase64String(SalvageTargets.ToBytes() ?? new byte[0]);
+                MyAPIGateway.Utilities.SetVariable("HireCrew_SalvageTargets", salvageB64);
+                try
+                {
+                    using (var writer = MyAPIGateway.Utilities.WriteFileInWorldStorage("HireCrewSalvageTargets.dat", typeof(CrewSession)))
+                        writer.Write(salvageB64);
+                }
+                catch { }
+            }
         }
 
         public override void BeforeStart()
@@ -126,6 +144,13 @@ namespace HireCrew
                 try { RepairPaths = RepairPathStore.FromBytes(pathPayload); }
                 catch { RepairPaths = new RepairPathStore(); }
             }
+            byte[] salvagePayload = TryLoadSalvageTargetBytes();
+            if (salvagePayload != null)
+            {
+                try { SalvageTargets = SalvageTargetStore.FromBytes(salvagePayload); }
+                catch { SalvageTargets = new SalvageTargetStore(); }
+            }
+            BroadcastSalvageTargetSync();
             RestoreAssignmentsFromStore();
             // Worlds saved before DespawnAllForSave may still contain leftover ambient bodies.
             CrewAmbientPresence.PurgeOrphanAmbientCharacters();
@@ -216,6 +241,32 @@ namespace HireCrew
             return null;
         }
 
+        private static byte[] TryLoadSalvageTargetBytes()
+        {
+            string varB64;
+            if (MyAPIGateway.Utilities.GetVariable("HireCrew_SalvageTargets", out varB64) && !string.IsNullOrEmpty(varB64))
+            {
+                try { return Convert.FromBase64String(varB64); }
+                catch { }
+            }
+
+            try
+            {
+                if (MyAPIGateway.Utilities.FileExistsInWorldStorage("HireCrewSalvageTargets.dat", typeof(CrewSession)))
+                {
+                    using (var reader = MyAPIGateway.Utilities.ReadFileInWorldStorage("HireCrewSalvageTargets.dat", typeof(CrewSession)))
+                    {
+                        var b64 = reader.ReadToEnd();
+                        if (!string.IsNullOrEmpty(b64))
+                            return Convert.FromBase64String(b64);
+                    }
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
         protected override void UnloadData()
         {
             if (_hud != null)
@@ -239,6 +290,8 @@ namespace HireCrew
             CrewAmbientPresence.ClearRuntime();
             CrewRepairMission.ClearAll();
             CrewSalvageMission.ClearAll();
+            CrewSalvageTargetPainter.SetActive(false, 0);
+            CrewSalvageTargetHighlight.ClearAll();
             if (WeaponAi != null) WeaponAi.Unload();
             WeaponAi = null;
             PowerBuff = null;
@@ -309,6 +362,8 @@ namespace HireCrew
             if (_hud != null)
                 _hud.Update();
             CrewPathPainter.Update(this);
+            CrewSalvageTargetPainter.Update(this);
+            CrewSalvageTargetHighlight.Draw();
 
             if (!MyAPIGateway.Multiplayer.IsServer || Store == null) return;
             // Wander steering must run every frame; spawn/lifecycle stays ~1 Hz.
@@ -433,6 +488,18 @@ namespace HireCrew
                     StoreBytes = Store.ToBytes()
                 };
                 CrewNetworking.SendToPlayer(CrewNetworking.RosterMsg, CrewNetworking.Serialize(sync), steamId);
+                if (SalvageTargets != null)
+                {
+                    SalvageTargets.CopyTo(_salvageTargetSyncBuf);
+                    var salvageSync = new SalvageTargetSync
+                    {
+                        Entries = new List<SalvageTargetEntry>(_salvageTargetSyncBuf)
+                    };
+                    CrewNetworking.SendToPlayer(
+                        CrewNetworking.SalvageTargetSyncMsg,
+                        CrewNetworking.Serialize(salvageSync),
+                        steamId);
+                }
                 _rosterSyncedSteamIds.Add(steamId);
             }
 
@@ -516,6 +583,14 @@ namespace HireCrew
                 return;
             }
 
+            if (id == CrewNetworking.SalvageTargetSyncMsg)
+            {
+                if (MyAPIGateway.Multiplayer.IsServer) return;
+                var sync = CrewNetworking.Deserialize<SalvageTargetSync>(data);
+                CrewSalvageTargetHighlight.ApplySync(sync != null ? sync.Entries : null);
+                return;
+            }
+
             if (!MyAPIGateway.Multiplayer.IsServer) return;
 
             var identityId = GetIdentityId(sender);
@@ -549,16 +624,57 @@ namespace HireCrew
                 HandleRepairDispatch(CrewNetworking.Deserialize<RepairDispatchRequest>(data), identityId, sender);
             else if (id == CrewNetworking.SalvageDispatchMsg)
                 HandleSalvageDispatch(CrewNetworking.Deserialize<SalvageDispatchRequest>(data), identityId, sender);
+            else if (id == CrewNetworking.SalvageTargetEditMsg)
+                HandleSalvageTargetEdit(CrewNetworking.Deserialize<SalvageTargetEditRequest>(data), identityId, sender);
         }
 
         public void ClientRequestAdmin(AdminCommandRequest req)
         {
             if (req == null) return;
+
+            // Stamp local controlled/managed grid so server fill/reroll-near don't rely on
+            // server-side IMyPlayer.Controller (often empty for the chat sender).
+            if (req.GridEntityId == 0)
+            {
+                IMyCubeGrid localGrid;
+                string ignore;
+                if (TryGetLocalManagedGrid(out localGrid, out ignore) && localGrid != null)
+                    req.GridEntityId = localGrid.EntityId;
+                else if (TryGetLocalControlledGrid(out localGrid) && localGrid != null)
+                    req.GridEntityId = localGrid.EntityId;
+            }
+
             var data = CrewNetworking.Serialize(req);
             if (MyAPIGateway.Multiplayer.IsServer)
-                HandleAdminCommand(req, MyAPIGateway.Session.Player.IdentityId, MyAPIGateway.Multiplayer.MyId);
+            {
+                var player = MyAPIGateway.Session != null ? MyAPIGateway.Session.Player : null;
+                long identityId = player != null ? player.IdentityId : 0;
+                HandleAdminCommand(req, identityId, MyAPIGateway.Multiplayer.MyId);
+            }
             else
                 CrewNetworking.SendToServer(CrewNetworking.AdminCommandMsg, data);
+        }
+
+        /// <summary>Local player's controlled ship controller grid (no ownership check).</summary>
+        public bool TryGetLocalControlledGrid(out IMyCubeGrid grid)
+        {
+            grid = null;
+            var player = MyAPIGateway.Session != null ? MyAPIGateway.Session.Player : null;
+            if (player == null)
+                return false;
+            try
+            {
+                var controlled = player.Controller != null
+                    ? player.Controller.ControlledEntity as IMyShipController
+                    : null;
+                if (controlled != null && controlled.CubeGrid != null && !controlled.CubeGrid.Closed)
+                {
+                    grid = controlled.CubeGrid;
+                    return true;
+                }
+            }
+            catch { }
+            return false;
         }
 
         public void ClientRequestPathEdit(PathEditRequest req)
@@ -600,6 +716,336 @@ namespace HireCrew
                 CrewNetworking.SendToServer(CrewNetworking.SalvageDispatchMsg, data);
         }
 
+        public void ClientRequestSalvageTargetEdit(long homeGridEntityId, long targetGridEntityId, bool clearAllManaged = false)
+        {
+            if (!clearAllManaged && homeGridEntityId == 0)
+                return;
+            var req = new SalvageTargetEditRequest
+            {
+                HomeGridEntityId = homeGridEntityId,
+                TargetGridEntityId = targetGridEntityId,
+                ClearAllManaged = clearAllManaged
+            };
+            var data = CrewNetworking.Serialize(req);
+            if (MyAPIGateway.Multiplayer.IsServer)
+                HandleSalvageTargetEdit(req, MyAPIGateway.Session.Player.IdentityId, MyAPIGateway.Multiplayer.MyId);
+            else
+                CrewNetworking.SendToServer(CrewNetworking.SalvageTargetEditMsg, data);
+        }
+
+        private void HandleSalvageTargetEdit(SalvageTargetEditRequest req, long identityId, ulong steamId)
+        {
+            if (req == null || SalvageTargets == null)
+                return;
+
+            if (req.TargetGridEntityId == 0 && req.ClearAllManaged)
+            {
+                int removed = SalvageTargets.ClearWhereHome(homeId =>
+                {
+                    IMyCubeGrid g;
+                    return TryGetGrid(homeId, out g) && g != null && HasManagePermission(identityId, g);
+                });
+                int recalled = CrewSalvageMission.RecallMissionsOnManagedHomes(identityId, HasManagePermission);
+                BroadcastSalvageTargetSync();
+                string clearMsg = removed > 0
+                    ? "Salvage: cleared " + removed + " mark(s)"
+                    : "Salvage: no marks to clear";
+                if (recalled > 0)
+                    clearMsg += " — recalling " + recalled;
+                Notify(steamId, clearMsg);
+                return;
+            }
+
+            if (req.HomeGridEntityId == 0)
+                return;
+
+            IMyCubeGrid home;
+            if (!TryGetGrid(req.HomeGridEntityId, out home) || home == null)
+            {
+                Notify(steamId, "Salvage: home grid missing");
+                return;
+            }
+            if (!HasManagePermission(identityId, home))
+            {
+                Notify(steamId, "No permission");
+                return;
+            }
+
+            if (req.TargetGridEntityId == 0)
+            {
+                CollectLinkedHomeGridIds(home, _salvageHomeIdScratch);
+                SalvageTargets.ClearHomeIds(_salvageHomeIdScratch);
+                SalvageTargets.ClearConstruct(home, ResolveGridById);
+                int recalled = CrewSalvageMission.RetargetHomeMissions(home, 0);
+                BroadcastSalvageTargetSync();
+                Notify(steamId, recalled > 0
+                    ? "Salvage: target cleared — recalling " + recalled
+                    : "Salvage: target cleared");
+                return;
+            }
+
+            IMyCubeGrid target;
+            if (!TryGetGrid(req.TargetGridEntityId, out target) || target == null)
+            {
+                Notify(steamId, "Salvage: look at a grid");
+                return;
+            }
+
+            // Ownership check uses a synthetic crew-like viewer from the requesting player.
+            long viewerFaction = 0;
+            try
+            {
+                var f = MyAPIGateway.Session.Factions.TryGetPlayerFaction(identityId);
+                if (f != null) viewerFaction = f.FactionId;
+            }
+            catch { }
+
+            long primary = 0;
+            try
+            {
+                var owners = target.BigOwners;
+                if (owners != null && owners.Count > 0)
+                    primary = owners[0];
+            }
+            catch { }
+
+            long gridFaction = 0;
+            if (primary != 0)
+            {
+                try
+                {
+                    var f = MyAPIGateway.Session.Factions.TryGetPlayerFaction(primary);
+                    if (f != null) gridFaction = f.FactionId;
+                }
+                catch { }
+            }
+
+            var rel = CrewSalvageRules.ClassifyTarget(identityId, viewerFaction, primary, gridFaction);
+            if (!CrewSalvageRules.IsLegalTarget(rel))
+            {
+                Notify(steamId, "Salvage: illegal target (enemy)");
+                return;
+            }
+
+            double radius = CrewConfig.SalvageScanRadiusMeters;
+            if (Vector3D.DistanceSquared(home.WorldAABB.Center, target.WorldAABB.Center) > radius * radius)
+            {
+                Notify(steamId, "Salvage: target out of range");
+                return;
+            }
+
+            // Frozen padded AABB — debris that stay inside remain salvageable.
+            BoundingBoxD zone = SalvageTargetStore.BuildZoneFromGrid(target);
+            CollectLinkedHomeGridIds(home, _salvageHomeIdScratch);
+            AppendSalvageOpsHomeIds(home, _salvageHomeIdScratch);
+            SalvageTargets.SetZoneForHomeIds(_salvageHomeIdScratch, req.TargetGridEntityId, zone);
+            int retargeted = CrewSalvageMission.RetargetHomeMissions(home, zone, req.TargetGridEntityId);
+            BroadcastSalvageTargetSync();
+            string targetName = !string.IsNullOrEmpty(target.CustomName) ? target.CustomName : ("Grid " + target.EntityId);
+            string homeName = !string.IsNullOrEmpty(home.CustomName) ? home.CustomName : ("Grid " + home.EntityId);
+            string msg = "Salvage: " + homeName + " -> zone around " + targetName;
+            if (retargeted > 0)
+                msg += " (" + retargeted + " retargeted)";
+            Notify(steamId, msg);
+        }
+
+        private void CollectLinkedHomeGridIds(IMyCubeGrid home, List<long> into)
+        {
+            into.Clear();
+            if (home == null) return;
+            into.Add(home.EntityId);
+
+            _salvageGridGroupScratch.Clear();
+            try
+            {
+                MyAPIGateway.GridGroups.GetGroup(home, GridLinkTypeEnum.Mechanical, _salvageGridGroupScratch);
+            }
+            catch { _salvageGridGroupScratch.Clear(); }
+            AppendUniqueGridIds(_salvageGridGroupScratch, into);
+
+            _salvageGridGroupScratch.Clear();
+            try
+            {
+                MyAPIGateway.GridGroups.GetGroup(home, GridLinkTypeEnum.Physical, _salvageGridGroupScratch);
+            }
+            catch { _salvageGridGroupScratch.Clear(); }
+            AppendUniqueGridIds(_salvageGridGroupScratch, into);
+        }
+
+        private void AppendSalvageOpsHomeIds(IMyCubeGrid home, List<long> into)
+        {
+            if (home == null || Store == null || into == null) return;
+            foreach (var crew in Store.All)
+            {
+                if (crew == null || crew.Role != CrewRole.SalvageOps)
+                    continue;
+                if (crew.Status != CrewStatus.Seated || crew.GridEntityId == 0)
+                    continue;
+                IMyCubeGrid crewHome;
+                if (!TryGetGrid(crew.GridEntityId, out crewHome) || crewHome == null)
+                    continue;
+                if (!HomesLinked(home, crewHome))
+                    continue;
+                AppendUniqueId(into, crew.GridEntityId);
+            }
+        }
+
+        private bool HomesLinked(IMyCubeGrid a, IMyCubeGrid b)
+        {
+            if (a == null || b == null) return false;
+            if (a.EntityId == b.EntityId) return true;
+            try
+            {
+                if (a.IsSameConstructAs(b))
+                    return true;
+            }
+            catch { }
+
+            _salvageGridGroupScratch.Clear();
+            try
+            {
+                MyAPIGateway.GridGroups.GetGroup(a, GridLinkTypeEnum.Mechanical, _salvageGridGroupScratch);
+            }
+            catch { _salvageGridGroupScratch.Clear(); }
+            for (int i = 0; i < _salvageGridGroupScratch.Count; i++)
+            {
+                if (_salvageGridGroupScratch[i] != null
+                    && _salvageGridGroupScratch[i].EntityId == b.EntityId)
+                    return true;
+            }
+
+            _salvageGridGroupScratch.Clear();
+            try
+            {
+                MyAPIGateway.GridGroups.GetGroup(a, GridLinkTypeEnum.Physical, _salvageGridGroupScratch);
+            }
+            catch { _salvageGridGroupScratch.Clear(); }
+            for (int i = 0; i < _salvageGridGroupScratch.Count; i++)
+            {
+                if (_salvageGridGroupScratch[i] != null
+                    && _salvageGridGroupScratch[i].EntityId == b.EntityId)
+                    return true;
+            }
+            return false;
+        }
+
+        private bool ResolveSalvageZone(IMyCubeGrid home, out BoundingBoxD zone, out long seedGridEntityId)
+        {
+            zone = default(BoundingBoxD);
+            seedGridEntityId = 0;
+            if (home == null || SalvageTargets == null)
+                return false;
+
+            if (SalvageTargets.TryGetZoneForConstruct(home, ResolveGridById, out zone, out seedGridEntityId))
+                return true;
+
+            CollectLinkedHomeGridIds(home, _salvageHomeIdScratch);
+            for (int i = 0; i < _salvageHomeIdScratch.Count; i++)
+            {
+                if (SalvageTargets.TryGetZone(_salvageHomeIdScratch[i], out zone))
+                {
+                    seedGridEntityId = SalvageTargets.GetTarget(_salvageHomeIdScratch[i]);
+                    return true;
+                }
+            }
+
+            return SalvageTargets.TryFindZoneWhereHome(markHomeId =>
+            {
+                IMyCubeGrid markHome;
+                if (!TryGetGrid(markHomeId, out markHome) || markHome == null)
+                    return false;
+                return HomesLinked(home, markHome);
+            }, out zone, out seedGridEntityId);
+        }
+
+        private long ResolveSalvageTargetId(IMyCubeGrid home)
+        {
+            BoundingBoxD zone;
+            long seed;
+            if (!ResolveSalvageZone(home, out zone, out seed))
+                return 0;
+            return seed != 0 ? seed : 1;
+        }
+
+        private static void AppendUniqueGridIds(List<IMyCubeGrid> grids, List<long> into)
+        {
+            if (grids == null || into == null) return;
+            for (int i = 0; i < grids.Count; i++)
+            {
+                var g = grids[i];
+                if (g == null || g.Closed) continue;
+                AppendUniqueId(into, g.EntityId);
+            }
+        }
+
+        private static void AppendUniqueId(List<long> into, long id)
+        {
+            if (into == null || id == 0) return;
+            for (int j = 0; j < into.Count; j++)
+            {
+                if (into[j] == id)
+                    return;
+            }
+            into.Add(id);
+        }
+
+        private static IMyCubeGrid ResolveGridById(long entityId)
+        {
+            IMyCubeGrid g;
+            return TryGetGrid(entityId, out g) ? g : null;
+        }
+
+        /// <summary>Clear frozen salvage zone for a home construct and sync highlights.</summary>
+        public void ClearSalvageMarkForHome(long homeGridEntityId)
+        {
+            if (SalvageTargets == null || homeGridEntityId == 0)
+                return;
+
+            IMyCubeGrid home;
+            if (TryGetGrid(homeGridEntityId, out home) && home != null)
+            {
+                CollectLinkedHomeGridIds(home, _salvageHomeIdScratch);
+                SalvageTargets.ClearHomeIds(_salvageHomeIdScratch);
+                SalvageTargets.ClearConstruct(home, ResolveGridById);
+            }
+            else
+            {
+                SalvageTargets.Clear(homeGridEntityId);
+            }
+            BroadcastSalvageTargetSync();
+        }
+
+        private void BroadcastSalvageTargetSync()
+        {
+            if (SalvageTargets == null) return;
+            SalvageTargets.CopyTo(_salvageTargetSyncBuf);
+
+            if (!MyAPIGateway.Utilities.IsDedicated)
+                CrewSalvageTargetHighlight.ApplySync(_salvageTargetSyncBuf);
+
+            if (!MyAPIGateway.Multiplayer.IsServer) return;
+
+            var sync = new SalvageTargetSync
+            {
+                Entries = new List<SalvageTargetEntry>(_salvageTargetSyncBuf)
+            };
+            byte[] data = CrewNetworking.Serialize(sync);
+
+            var players = new List<IMyPlayer>();
+            MyAPIGateway.Players.GetPlayers(players);
+            ulong localSteam = MyAPIGateway.Multiplayer.MyId;
+            for (int i = 0; i < players.Count; i++)
+            {
+                var p = players[i];
+                if (p == null) continue;
+                ulong steam = p.SteamUserId;
+                if (steam == 0) continue;
+                if (!MyAPIGateway.Utilities.IsDedicated && steam == localSteam)
+                    continue;
+                CrewNetworking.SendToPlayer(CrewNetworking.SalvageTargetSyncMsg, data, steam);
+            }
+        }
+
         private void HandleSalvageDispatch(SalvageDispatchRequest req, long identityId, ulong steamId)
         {
             if (req == null || string.IsNullOrEmpty(req.CrewId) || Store == null)
@@ -639,10 +1085,29 @@ namespace HireCrew
                 return;
             }
 
-            bool started = CrewSalvageMission.DispatchCrew(this, crew.CrewId, req.TargetGridEntityId);
+            BoundingBoxD zone;
+            long seedId;
+            bool haveZone = ResolveSalvageZone(home, out zone, out seedId);
+            if (!haveZone && req.TargetGridEntityId != 0)
+            {
+                IMyCubeGrid seedGrid;
+                if (TryGetGrid(req.TargetGridEntityId, out seedGrid) && seedGrid != null)
+                {
+                    zone = SalvageTargetStore.BuildZoneFromGrid(seedGrid);
+                    seedId = req.TargetGridEntityId;
+                    haveZone = true;
+                }
+            }
+            if (!haveZone)
+            {
+                Notify(steamId, "Salvage: no target — /crew salvage then LMB a wreck");
+                return;
+            }
+
+            bool started = CrewSalvageMission.DispatchCrew(this, crew.CrewId, zone, seedId);
             Notify(steamId, started
                 ? "Salvage: sent " + (crew.DisplayName ?? "salvager")
-                : "Salvage: invalid target / not ready");
+                : "Salvage: nothing left in zone / not ready");
         }
 
         private void HandleRepairDispatch(RepairDispatchRequest req, long identityId, ulong steamId)
@@ -893,6 +1358,12 @@ namespace HireCrew
         public void AdminBroadcastHirePool(HireBlockPool pool)
         {
             BroadcastHirePool(pool);
+        }
+
+        /// <summary>Admin fill/hire path: apply seat assign without notify/broadcast. Null = ok.</summary>
+        public string AdminTryApplyAssign(AssignRequest req, long adminIdentityId, IMyCubeGrid grid)
+        {
+            return TryApplyAssign(req, adminIdentityId, grid);
         }
 
         public void AdminResolveOwnerKey(long identityId, out long ownerKey, out bool ownerIsFaction)

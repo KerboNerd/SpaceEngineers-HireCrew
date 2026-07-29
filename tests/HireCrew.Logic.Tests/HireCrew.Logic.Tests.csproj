@@ -22,5 +22,7 @@
     <Compile Include="..\..\Data\Scripts\HireCrew\CrewHudModel.cs" Link="CrewHudModel.cs" />
     <Compile Include="..\..\Data\Scripts\HireCrew\CrewStatusHudModel.cs" Link="CrewStatusHudModel.cs" />
     <Compile Include="..\..\Data\Scripts\HireCrew\CrewSalvageRules.cs" Link="CrewSalvageRules.cs" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\CrewMissionMarkerRules.cs" Link="CrewMissionMarkerRules.cs" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\CrewAdminFillRules.cs" Link="CrewAdminFillRules.cs" />
   </ItemGroup>
 </Project>

@@ -59,6 +59,11 @@ namespace HireCrew
                     CmdHire(session, args, adminIdentityId, adminSteamId);
                     return;
                 }
+                if (verb == "fill")
+                {
+                    CmdFill(session, args, adminIdentityId, adminSteamId, req.GridEntityId);
+                    return;
+                }
                 if (verb == "reroll")
                 {
                     CmdReroll(session, args, adminSteamId);
@@ -101,6 +106,7 @@ namespace HireCrew
                 "HireCrew admin (/hirecrew or /hc):",
                 "help | config show|reload",
                 "hire <role> <stars> [player]",
+                "fill <construction|salvage> [count]",
                 "reroll <blockId>|near",
                 "roster <player|steamid>",
                 "dismiss <crewId>",
@@ -214,6 +220,340 @@ namespace HireCrew
                 "Hired " + record.DisplayName + " " + CrewConfig.FormatStars(record.Stars)
                 + " " + CrewConfig.RoleLabel(role) + " → " + targetIdentity);
             MyLog.Default.WriteLineAndConsole("[HireCrew] admin " + steamId + " hire " + record.CrewId);
+        }
+
+        private static void CmdFill(CrewSession session, List<string> args, long adminIdentityId, ulong steamId, long clientGridEntityId)
+        {
+            if (args.Count < 1)
+            {
+                session.AdminNotify(steamId, "Usage: /hirecrew fill <construction|salvage> [count]");
+                return;
+            }
+
+            CrewRole role;
+            if (!TryParseRole(args[0], out role) || !CrewAdminFillRules.IsFillRole(role))
+            {
+                session.AdminNotify(steamId, "Bad role. construction|salvage only");
+                return;
+            }
+
+            int count = CrewAdminFillRules.DefaultCount;
+            if (args.Count >= 2)
+            {
+                int parsed;
+                if (!int.TryParse(args[1], out parsed))
+                {
+                    session.AdminNotify(steamId, "Bad count. 1-" + CrewAdminFillRules.MaxCount);
+                    return;
+                }
+                count = CrewAdminFillRules.ClampCount(parsed);
+            }
+
+            if (session.Store == null)
+            {
+                session.AdminNotify(steamId, "Store missing");
+                return;
+            }
+
+            IMyCubeGrid grid = null;
+            if (clientGridEntityId != 0)
+            {
+                IMyEntity ent;
+                if (MyAPIGateway.Entities.TryGetEntityById(clientGridEntityId, out ent) && ent != null)
+                    grid = ent as IMyCubeGrid;
+            }
+            if (grid == null || grid.Closed)
+            {
+                if (!TryGetAdminGrid(steamId, adminIdentityId, out grid) || grid == null || grid.Closed)
+                {
+                    session.AdminNotify(steamId, "Not on a grid — sit in a cockpit then retry");
+                    return;
+                }
+            }
+
+            long ownerKey;
+            bool ownerIsFaction;
+            session.AdminResolveOwnerKey(adminIdentityId, out ownerKey, out ownerIsFaction);
+
+            var freeSeats = new List<IMyTerminalBlock>();
+            CollectFreeSeats(session, grid, freeSeats);
+
+            int assigned = 0;
+            int noSeat = 0;
+            int seatIndex = 0;
+
+            for (int i = 0; i < count; i++)
+            {
+                var record = new CrewRecord
+                {
+                    CrewId = Guid.NewGuid().ToString("N"),
+                    Stars = CrewConfig.ClampStars(CrewAdminFillRules.FillStars),
+                    Role = role,
+                    GridEntityId = 0,
+                    OwnerIdentityId = adminIdentityId,
+                    OwnerKey = ownerKey,
+                    OwnerIsFaction = ownerIsFaction,
+                    Status = CrewStatus.Unassigned,
+                    DisplayName = CrewNames.RollFullName(session.HireRng)
+                };
+                session.Store.Upsert(record);
+
+                if (seatIndex >= freeSeats.Count)
+                {
+                    noSeat++;
+                    continue;
+                }
+
+                var seat = freeSeats[seatIndex++];
+                var assignReq = new AssignRequest
+                {
+                    CrewId = record.CrewId,
+                    GridEntityId = grid.EntityId,
+                    SeatEntityId = seat.EntityId,
+                    WeaponEntityId = 0
+                };
+                string err = session.AdminTryApplyAssign(assignReq, adminIdentityId, grid);
+                if (err != null)
+                {
+                    noSeat++;
+                    continue;
+                }
+                assigned++;
+            }
+
+            session.AdminBroadcastRoster();
+            string gridName = grid.CustomName;
+            if (string.IsNullOrEmpty(gridName))
+                gridName = grid.DisplayName;
+            session.AdminNotify(steamId,
+                CrewAdminFillRules.FormatResult(CrewConfig.RoleLabel(role), assigned, count, noSeat, gridName ?? "?"));
+            MyLog.Default.WriteLineAndConsole(
+                "[HireCrew] admin " + steamId + " fill " + role + " assigned " + assigned + "/" + count
+                + " grid " + grid.EntityId);
+        }
+
+        /// <summary>
+        /// Resolve the admin's ship. While piloting, Character is often null and
+        /// GetTopMostParent→grid fails on foot — use controller, parent seat, pilot scan,
+        /// then nearest grid to player.GetPosition().
+        /// </summary>
+        private static bool TryGetAdminGrid(ulong adminSteamId, long adminIdentityId, out IMyCubeGrid grid)
+        {
+            grid = null;
+            var player = ResolveAdminPlayer(adminSteamId, adminIdentityId);
+            if (player == null)
+                return false;
+
+            long identityId = adminIdentityId != 0 ? adminIdentityId : player.IdentityId;
+
+            try
+            {
+                // ControlledEntity is IMyControllableEntity — cast via IMyShipController (same as TryGetLocalManagedGrid).
+                var controlledSeat = player.Controller != null
+                    ? player.Controller.ControlledEntity as IMyShipController
+                    : null;
+                if (controlledSeat != null && controlledSeat.CubeGrid != null && !controlledSeat.CubeGrid.Closed)
+                {
+                    grid = controlledSeat.CubeGrid;
+                    return true;
+                }
+            }
+            catch { }
+
+            var character = player.Character;
+            if (character != null)
+            {
+                IMyEntity parent = null;
+                try { parent = character.Parent; }
+                catch { parent = null; }
+                if (TryGridFromEntity(parent, out grid))
+                    return true;
+
+                IMyEntity top = null;
+                try { top = character.GetTopMostParent(); }
+                catch { top = null; }
+                if (TryGridFromEntity(top, out grid))
+                    return true;
+            }
+
+            if (TryFindGridByPilot(character, identityId, out grid))
+                return true;
+
+            Vector3D pos;
+            try { pos = player.GetPosition(); }
+            catch
+            {
+                if (character == null)
+                    return false;
+                pos = character.GetPosition();
+            }
+
+            grid = FindGridNearPosition(pos, 80.0);
+            return grid != null;
+        }
+
+        private static IMyPlayer ResolveAdminPlayer(ulong adminSteamId, long adminIdentityId)
+        {
+            var player = GetOnlinePlayer(adminSteamId);
+            if (player != null)
+                return player;
+
+            if (adminIdentityId != 0)
+            {
+                var players = new List<IMyPlayer>();
+                MyAPIGateway.Players.GetPlayers(players, p => p != null && p.IdentityId == adminIdentityId);
+                if (players.Count > 0)
+                    return players[0];
+            }
+
+            return MyAPIGateway.Session != null ? MyAPIGateway.Session.Player : null;
+        }
+
+        private static bool TryGridFromEntity(IMyEntity ent, out IMyCubeGrid grid)
+        {
+            grid = null;
+            if (ent == null || ent.Closed)
+                return false;
+
+            grid = ent as IMyCubeGrid;
+            if (grid != null && !grid.Closed)
+                return true;
+
+            var sc = ent as IMyShipController;
+            if (sc != null && sc.CubeGrid != null && !sc.CubeGrid.Closed)
+            {
+                grid = sc.CubeGrid;
+                return true;
+            }
+
+            var block = ent as IMyCubeBlock;
+            if (block != null && block.CubeGrid != null && !block.CubeGrid.Closed)
+            {
+                grid = block.CubeGrid;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryFindGridByPilot(IMyCharacter character, long identityId, out IMyCubeGrid grid)
+        {
+            grid = null;
+            var entities = new HashSet<IMyEntity>();
+            try { MyAPIGateway.Entities.GetEntities(entities); }
+            catch { return false; }
+
+            foreach (var ent in entities)
+            {
+                var sc = ent as IMyShipController;
+                if (sc == null || sc.CubeGrid == null || sc.CubeGrid.Closed)
+                    continue;
+
+                var pilot = sc.Pilot;
+                if (pilot == null)
+                    continue;
+
+                if (character != null && pilot.EntityId == character.EntityId)
+                {
+                    grid = sc.CubeGrid;
+                    return true;
+                }
+
+                try
+                {
+                    if (identityId != 0 && pilot.ControllerInfo != null
+                        && pilot.ControllerInfo.ControllingIdentityId == identityId)
+                    {
+                        grid = sc.CubeGrid;
+                        return true;
+                    }
+                }
+                catch { }
+            }
+
+            return false;
+        }
+
+        private static IMyCubeGrid FindGridNearPosition(Vector3D worldPos, double maxDistMeters)
+        {
+            if (maxDistMeters < 1.0)
+                maxDistMeters = 1.0;
+
+            var entities = new HashSet<IMyEntity>();
+            try { MyAPIGateway.Entities.GetEntities(entities); }
+            catch { return null; }
+
+            IMyCubeGrid best = null;
+            double bestDistSq = maxDistMeters * maxDistMeters;
+
+            foreach (var ent in entities)
+            {
+                var g = ent as IMyCubeGrid;
+                if (g == null || g.Closed)
+                    continue;
+
+                var box = g.WorldAABB;
+                box.Inflate(5.0);
+                Vector3D closest = Vector3D.Clamp(worldPos, box.Min, box.Max);
+                double d = Vector3D.DistanceSquared(worldPos, closest);
+                if (d < bestDistSq)
+                {
+                    bestDistSq = d;
+                    best = g;
+                }
+            }
+
+            return best;
+        }
+
+        private static void CollectFreeSeats(CrewSession session, IMyCubeGrid grid, List<IMyTerminalBlock> into)
+        {
+            into.Clear();
+            if (grid == null || session == null) return;
+
+            var taken = new HashSet<long>();
+            var constructCrew = session.GetCrewForConstruct(grid);
+            if (constructCrew != null)
+            {
+                for (int i = 0; i < constructCrew.Count; i++)
+                {
+                    var c = constructCrew[i];
+                    if (c != null && c.Status == CrewStatus.Seated && c.SeatEntityId.HasValue)
+                        taken.Add(c.SeatEntityId.Value);
+                }
+            }
+
+            var blocks = new List<IMySlimBlock>();
+            var parts = new List<IMyCubeGrid>();
+            try
+            {
+                MyAPIGateway.GridGroups.GetGroup(grid, GridLinkTypeEnum.Mechanical, parts);
+            }
+            catch
+            {
+                parts.Clear();
+            }
+            if (parts.Count == 0)
+                parts.Add(grid);
+
+            for (int g = 0; g < parts.Count; g++)
+            {
+                var part = parts[g];
+                if (part == null) continue;
+                blocks.Clear();
+                part.GetBlocks(blocks);
+                for (int i = 0; i < blocks.Count; i++)
+                {
+                    var slim = blocks[i];
+                    if (slim == null) continue;
+                    var term = slim.FatBlock as IMyTerminalBlock;
+                    if (term == null || term.MarkedForClose) continue;
+                    if (!CrewStationLogic.IsAssignableSeat(term)) continue;
+                    if (CrewStationLogic.IsSeatOccupiedByPlayer(term)) continue;
+                    if (taken.Contains(term.EntityId)) continue;
+                    into.Add(term);
+                }
+            }
         }
 
         private static void CmdReroll(CrewSession session, List<string> args, ulong steamId)

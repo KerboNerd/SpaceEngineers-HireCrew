@@ -210,6 +210,8 @@ namespace HireCrew
     {
         [ProtoMember(1)] public string Verb;
         [ProtoMember(2)] public List<string> Args = new List<string>();
+        /// <summary>Optional client-resolved grid (cockpit/control). 0 = server must resolve.</summary>
+        [ProtoMember(3)] public long GridEntityId;
     }
 
     [ProtoContract]
@@ -320,7 +322,38 @@ namespace HireCrew
         [ProtoMember(1)] public string CrewId;
         /// <summary>false = Salvage this crew, true = Recall this crew.</summary>
         [ProtoMember(2)] public bool Recall;
-        /// <summary>Target wreck/home grid. Ignored when Recall is true.</summary>
+        /// <summary>Optional override. Prefer server home-grid marked target when 0.</summary>
         [ProtoMember(3)] public long TargetGridEntityId;
+    }
+
+    [ProtoContract]
+    public sealed class SalvageTargetEntry
+    {
+        [ProtoMember(1)] public long HomeGridEntityId;
+        /// <summary>Seed wreck id at mark time (optional; zone is authoritative for grinding).</summary>
+        [ProtoMember(2)] public long TargetGridEntityId;
+        [ProtoMember(3)] public bool HasZone;
+        [ProtoMember(4)] public double ZoneMinX;
+        [ProtoMember(5)] public double ZoneMinY;
+        [ProtoMember(6)] public double ZoneMinZ;
+        [ProtoMember(7)] public double ZoneMaxX;
+        [ProtoMember(8)] public double ZoneMaxY;
+        [ProtoMember(9)] public double ZoneMaxZ;
+    }
+
+    [ProtoContract]
+    public sealed class SalvageTargetEditRequest
+    {
+        [ProtoMember(1)] public long HomeGridEntityId;
+        /// <summary>0 = clear target for this home grid (or all managed if ClearAllManaged).</summary>
+        [ProtoMember(2)] public long TargetGridEntityId;
+        /// <summary>When clearing, remove marks on every home grid this player can manage.</summary>
+        [ProtoMember(3)] public bool ClearAllManaged;
+    }
+
+    [ProtoContract]
+    public sealed class SalvageTargetSync
+    {
+        [ProtoMember(1)] public List<SalvageTargetEntry> Entries = new List<SalvageTargetEntry>();
     }
 }

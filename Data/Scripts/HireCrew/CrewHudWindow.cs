@@ -119,18 +119,6 @@ namespace HireCrew
         private readonly float[] _rowHeights = new float[MaxRows];
         private int _rowCount;
         private int _listTotalCount;
-        /// <summary>Non-empty while choosing a salvage target grid for this crew.</summary>
-        private string _salvagePickerCrewId;
-        private readonly HashSet<IMyEntity> _entityScratch = new HashSet<IMyEntity>();
-        private readonly List<SalvagePickerRow> _salvagePickerScratch = new List<SalvagePickerRow>(32);
-
-        private sealed class SalvagePickerRow
-        {
-            public long GridEntityId;
-            public string Label;
-            public double DistanceMeters;
-            public bool IsHome;
-        }
 
         private CrewHudButton _btnAssign;
         private CrewHudButton _btnUnassign;
@@ -380,23 +368,11 @@ namespace HireCrew
             _btnConfirm.MouseInput.LeftReleased += (s, a) => WizardConfirm();
             _btnBack.MouseInput.LeftReleased += (s, a) =>
             {
-                if (!string.IsNullOrEmpty(_salvagePickerCrewId))
-                {
-                    CloseSalvagePicker();
-                    Refresh();
-                    return;
-                }
                 _model.WizardBack();
                 Refresh();
             };
             _btnCancel.MouseInput.LeftReleased += (s, a) =>
             {
-                if (!string.IsNullOrEmpty(_salvagePickerCrewId))
-                {
-                    CloseSalvagePicker();
-                    Refresh();
-                    return;
-                }
                 RequestClose();
             };
             _btnClose.MouseInput.LeftReleased += (s, a) => RequestClose();
@@ -554,7 +530,6 @@ namespace HireCrew
 
         public void Hide()
         {
-            CloseSalvagePicker();
             Visible = false;
             HudMain.EnableCursor = false;
         }
@@ -621,24 +596,23 @@ namespace HireCrew
             CrewRecord bulkEditCrew = bulkEdit != null ? FindCrewById(session, bulkEdit.CrewId) : null;
             bool bulkNeedsWeapon = bulkEditCrew != null && CrewConfig.NeedsWeapon(bulkEditCrew.Role);
 
-            bool salvagePicker = !string.IsNullOrEmpty(_salvagePickerCrewId);
             bool offshipFocused = poolOnly && _model.HasFocusedGrid;
-            _btnAssign.Visible = home && !poolOnly && !bulkOn && !salvagePicker;
-            _btnUnassign.Visible = home && !bulkOn && (!poolOnly || offshipFocused) && !salvagePicker;
-            _btnQuarters.Visible = home && !poolOnly && !bulkOn && !salvagePicker;
-            _btnTrain.Visible = home && !bulkOn && !salvagePicker;
-            _btnDismiss.Visible = home && !bulkOn && !salvagePicker;
-            _btnBulk.Visible = home && !poolOnly && !salvagePicker;
-            _btnBulkAssign.Visible = home && !poolOnly && bulkOn && !salvagePicker;
-            _btnClearBulk.Visible = home && !poolOnly && bulkOn && !salvagePicker;
+            _btnAssign.Visible = home && !poolOnly && !bulkOn;
+            _btnUnassign.Visible = home && !bulkOn && (!poolOnly || offshipFocused);
+            _btnQuarters.Visible = home && !poolOnly && !bulkOn;
+            _btnTrain.Visible = home && !bulkOn;
+            _btnDismiss.Visible = home && !bulkOn;
+            _btnBulk.Visible = home && !poolOnly;
+            _btnBulkAssign.Visible = home && !poolOnly && bulkOn;
+            _btnClearBulk.Visible = home && !poolOnly && bulkOn;
             _btnBulkSeat.Visible = bulkMap;
             _btnBulkWeapon.Visible = bulkMap;
-            _btnClose.Visible = home && !salvagePicker;
+            _btnClose.Visible = home;
             _btnNext.Visible = !poolOnly && (assignCrew || (assignSeat && !seatOnlyAssign) || quartersCrew);
             _btnConfirm.Visible = dismissPick || unassignPick || trainConfirm || cancelTrainConfirm || bulkMap
                 || (!poolOnly && (assignWeapon || quartersSlots || (assignSeat && seatOnlyAssign)));
-            _btnBack.Visible = !home || salvagePicker;
-            _btnCancel.Visible = !home || salvagePicker;
+            _btnBack.Visible = !home;
+            _btnCancel.Visible = !home;
 
             if (home)
             {
@@ -735,34 +709,20 @@ namespace HireCrew
 
             if (home)
             {
-                if (salvagePicker)
+                _header.Text = bulkOn ? "Crew Roster · Bulk" : "Crew Roster";
+                FillHome(session);
+                if (poolOnly)
                 {
-                    _header.Text = "Salvage · Pick target";
-                    _context.Visible = true;
-                    _context.Text = "Select a legal grid within "
-                        + (int)CrewConfig.SalvageScanRadiusMeters + " m";
-                    FillSalvageTargetPicker(session);
-                    _status.Text = ScrollStatus(_listTotalCount == 0
-                        ? "No legal targets in range"
-                        : "Tap a grid to dispatch");
+                    if (_model.HasFocusedGrid)
+                        _status.Text = ScrollStatus("Off ship · viewing " + ResolveGridLabel(_model.FocusedGridId));
+                    else
+                        _status.Text = ScrollStatus("Off ship · select a grid");
                 }
                 else
                 {
-                    _header.Text = bulkOn ? "Crew Roster · Bulk" : "Crew Roster";
-                    FillHome(session);
-                    if (poolOnly)
-                    {
-                        if (_model.HasFocusedGrid)
-                            _status.Text = ScrollStatus("Off ship · viewing " + ResolveGridLabel(_model.FocusedGridId));
-                        else
-                            _status.Text = ScrollStatus("Off ship · select a grid");
-                    }
-                    else
-                    {
-                        _status.Text = ScrollStatus(bulkOn
-                            ? "Tap unassigned crew to multi-select"
-                            : gridName + " (faction/personal pool)");
-                    }
+                    _status.Text = ScrollStatus(bulkOn
+                        ? "Tap unassigned crew to multi-select"
+                        : gridName + " (faction/personal pool)");
                 }
             }
             else if (trainConfirm)
@@ -1283,7 +1243,25 @@ namespace HireCrew
                     Refresh();
                     return;
                 }
-                OpenSalvageTargetPicker(crew);
+                // Zone mark is authoritative; seed id is optional for older clients.
+                bool marked = CrewSalvageTargetHighlight.HasMark(crew.GridEntityId);
+                if (!marked && _model.HasManagedGrid)
+                    marked = CrewSalvageTargetHighlight.HasMark(_model.GridEntityId);
+                long seed = CrewSalvageTargetHighlight.GetTarget(crew.GridEntityId);
+                if (seed == 0 && _model.HasManagedGrid)
+                    seed = CrewSalvageTargetHighlight.GetTarget(_model.GridEntityId);
+                if (!marked && seed == 0)
+                {
+                    try
+                    {
+                        MyAPIGateway.Utilities.ShowMessage("HireCrew", "Salvage: no target — /crew salvage then LMB a wreck");
+                        MyAPIGateway.Utilities.ShowNotification("HireCrew: no salvage zone marked", 3000);
+                    }
+                    catch { }
+                    return;
+                }
+                session.ClientRequestSalvageDispatch(crew.CrewId, false, seed == 1 ? 0 : seed);
+                Refresh();
                 return;
             }
 
@@ -1291,158 +1269,6 @@ namespace HireCrew
                 return;
             bool recall = CrewRepairMission.IsCrewOnMission(crew.CrewId);
             session.ClientRequestRepairDispatch(crew.CrewId, recall);
-            Refresh();
-        }
-
-        private void CloseSalvagePicker()
-        {
-            _salvagePickerCrewId = null;
-            _salvagePickerScratch.Clear();
-        }
-
-        private void OpenSalvageTargetPicker(CrewRecord crew)
-        {
-            if (crew == null || string.IsNullOrEmpty(crew.CrewId))
-                return;
-            _salvagePickerCrewId = crew.CrewId;
-            _model.ListScrollOffset = 0;
-            Refresh();
-            if (_listTotalCount == 0)
-            {
-                MyAPIGateway.Utilities.ShowMessage("HireCrew", "Salvage: no legal targets in range");
-                CloseSalvagePicker();
-                Refresh();
-            }
-        }
-
-        private void FillSalvageTargetPicker(CrewSession session)
-        {
-            ClearRows();
-            _salvagePickerScratch.Clear();
-            if (session == null || session.Store == null || string.IsNullOrEmpty(_salvagePickerCrewId))
-            {
-                AddRow("(picker closed)", null, 0L, false, false);
-                _listTotalCount = 0;
-                return;
-            }
-
-            var crew = session.Store.Get(_salvagePickerCrewId);
-            if (crew == null || crew.GridEntityId == 0)
-            {
-                AddRow("(crew not ready)", null, 0L, false, false);
-                _listTotalCount = 0;
-                return;
-            }
-
-            IMyEntity homeEnt;
-            IMyCubeGrid home = null;
-            if (MyAPIGateway.Entities.TryGetEntityById(crew.GridEntityId, out homeEnt))
-                home = homeEnt as IMyCubeGrid;
-            if (home == null)
-            {
-                AddRow("(home grid missing)", null, 0L, false, false);
-                _listTotalCount = 0;
-                return;
-            }
-
-            long viewerId = crew.OwnerIdentityId != 0 ? crew.OwnerIdentityId : crew.OwnerKey;
-            long viewerFaction = 0;
-            if (crew.OwnerIsFaction && crew.OwnerKey != 0)
-                viewerFaction = crew.OwnerKey;
-            else if (viewerId != 0)
-            {
-                try
-                {
-                    var f = MyAPIGateway.Session.Factions.TryGetPlayerFaction(viewerId);
-                    if (f != null) viewerFaction = f.FactionId;
-                }
-                catch { }
-            }
-
-            Vector3D homeCenter = home.WorldAABB.Center;
-            double radius = CrewConfig.SalvageScanRadiusMeters;
-            double radiusSq = radius * radius;
-
-            _entityScratch.Clear();
-            try { MyAPIGateway.Entities.GetEntities(_entityScratch); }
-            catch { _entityScratch.Clear(); }
-
-            foreach (var ent in _entityScratch)
-            {
-                var g = ent as IMyCubeGrid;
-                if (g == null || g.Closed) continue;
-                double distSq = Vector3D.DistanceSquared(homeCenter, g.WorldAABB.Center);
-                if (distSq > radiusSq) continue;
-
-                long primary = 0;
-                try
-                {
-                    var owners = g.BigOwners;
-                    if (owners != null && owners.Count > 0)
-                        primary = owners[0];
-                }
-                catch { }
-
-                long gridFaction = 0;
-                if (primary != 0)
-                {
-                    try
-                    {
-                        var f = MyAPIGateway.Session.Factions.TryGetPlayerFaction(primary);
-                        if (f != null) gridFaction = f.FactionId;
-                    }
-                    catch { }
-                }
-
-                var rel = CrewSalvageRules.ClassifyTarget(viewerId, viewerFaction, primary, gridFaction);
-                if (!CrewSalvageRules.IsLegalTarget(rel))
-                    continue;
-
-                bool isHome = g.EntityId == home.EntityId;
-                string name = !string.IsNullOrEmpty(g.CustomName) ? g.CustomName : ("Grid " + g.EntityId);
-                int meters = (int)Math.Round(Math.Sqrt(distSq));
-                _salvagePickerScratch.Add(new SalvagePickerRow
-                {
-                    GridEntityId = g.EntityId,
-                    Label = (isHome ? "[Home] " : "") + name + " · " + meters + " m",
-                    DistanceMeters = Math.Sqrt(distSq),
-                    IsHome = isHome
-                });
-            }
-
-            _salvagePickerScratch.Sort((a, b) =>
-            {
-                if (a.IsHome != b.IsHome)
-                    return a.IsHome ? -1 : 1;
-                return a.DistanceMeters.CompareTo(b.DistanceMeters);
-            });
-
-            _listTotalCount = _salvagePickerScratch.Count;
-            if (_listTotalCount == 0)
-            {
-                AddRow("(none in range)", null, 0L, false, false);
-                return;
-            }
-
-            int start = _model.ClampListScroll(_listTotalCount, MaxRows);
-            for (int i = start; i < _salvagePickerScratch.Count && _rowCount < MaxRows; i++)
-            {
-                var row = _salvagePickerScratch[i];
-                if (row == null) continue;
-                AddRow(row.Label, null, row.GridEntityId, false, true);
-            }
-        }
-
-        private void ConfirmSalvageTarget(long targetGridEntityId)
-        {
-            if (string.IsNullOrEmpty(_salvagePickerCrewId) || targetGridEntityId == 0)
-                return;
-            var session = CrewSession.Instance;
-            if (session == null)
-                return;
-            string crewId = _salvagePickerCrewId;
-            CloseSalvagePicker();
-            session.ClientRequestSalvageDispatch(crewId, false, targetGridEntityId);
             Refresh();
         }
 
@@ -1967,7 +1793,7 @@ namespace HireCrew
                 case CrewRole.DamageControl:
                     return "EVA weld / project — Send from HUD";
                 case CrewRole.SalvageOps:
-                    return "Manual EVA salvage — pick a grid from HUD";
+                    return "EVA salvage — /crew salvage then LMB; Salvage from HUD";
                 default:
                     return "+10% range per amenity";
             }
@@ -2184,14 +2010,6 @@ namespace HireCrew
         {
             if (index < 0 || index >= _rowCount) return;
             if (!_rows[index].UseCursor) return;
-
-            if (!string.IsNullOrEmpty(_salvagePickerCrewId))
-            {
-                long targetId = _rowEntityIds[index];
-                if (targetId != 0)
-                    ConfirmSalvageTarget(targetId);
-                return;
-            }
 
             if (_model.Screen == CrewHudScreen.Home)
             {

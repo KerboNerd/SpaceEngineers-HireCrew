@@ -10,6 +10,8 @@ namespace HireCrew
     /// </summary>
     public static class CrewPathPainter
     {
+        private const double PaintRangeMeters = 80.0;
+
         private static bool _active;
         private static long _gridId;
         private static bool _wasLeft;
@@ -32,7 +34,8 @@ namespace HireCrew
             if (MyAPIGateway.Session == null || MyAPIGateway.Session.Player == null) return;
             try
             {
-                if (MyAPIGateway.Gui.ChatEntryVisible || MyAPIGateway.Gui.IsCursorVisible)
+                // Only chat blocks painting — IsCursorVisible is often true with Rich HUD overlays.
+                if (MyAPIGateway.Gui.ChatEntryVisible)
                     return;
             }
             catch { }
@@ -69,16 +72,20 @@ namespace HireCrew
                 return;
             }
 
-            IMyCubeBlock block;
+            IMySlimBlock slim;
+            IMyCubeGrid grid;
             Vector3D local;
-            if (!TryRayBlock(_gridId, out block, out local))
+            long fatId;
+            if (!CrewLookRay.TrySlimUnderCrosshair(PaintRangeMeters, out slim, out grid, out local, out fatId)
+                || grid == null
+                || grid.EntityId != _gridId)
                 return;
 
             session.ClientRequestPathEdit(new PathEditRequest
             {
                 GridEntityId = _gridId,
                 Op = 0,
-                BlockEntityId = block.EntityId,
+                BlockEntityId = fatId,
                 LocalX = local.X,
                 LocalY = local.Y,
                 LocalZ = local.Z
@@ -87,59 +94,7 @@ namespace HireCrew
 
         public static bool TryRayGridUnderCrosshair(out IMyCubeGrid grid)
         {
-            grid = null;
-            IMyCubeBlock block;
-            Vector3D local;
-            if (!TryRayAnyBlock(out block, out local) || block == null)
-                return false;
-            grid = block.CubeGrid;
-            return grid != null;
-        }
-
-        private static bool TryRayBlock(long gridId, out IMyCubeBlock block, out Vector3D local)
-        {
-            block = null;
-            local = Vector3D.Zero;
-            if (!TryRayAnyBlock(out block, out local) || block == null || block.CubeGrid == null)
-                return false;
-            return block.CubeGrid.EntityId == gridId;
-        }
-
-        private static bool TryRayAnyBlock(out IMyCubeBlock block, out Vector3D local)
-        {
-            block = null;
-            local = Vector3D.Zero;
-            var cam = MyAPIGateway.Session != null ? MyAPIGateway.Session.Camera : null;
-            if (cam == null) return false;
-
-            Vector3D from = cam.WorldMatrix.Translation;
-            Vector3D to = from + cam.WorldMatrix.Forward * 40.0;
-            IHitInfo hit;
-            if (!MyAPIGateway.Physics.CastRay(from, to, out hit)
-                || hit == null
-                || hit.HitEntity == null)
-                return false;
-
-            var grid = hit.HitEntity as IMyCubeGrid;
-            var cube = hit.HitEntity as IMyCubeBlock;
-            if (grid == null && cube != null)
-                grid = cube.CubeGrid;
-            if (grid == null)
-                return false;
-
-            var line = new LineD(from, to);
-            Vector3I cell = Vector3I.Zero;
-            double dist = 0;
-            if (!grid.GetLineIntersectionExactGrid(ref line, ref cell, ref dist))
-                return false;
-
-            var slim = grid.GetCubeBlock(cell);
-            if (slim == null || slim.FatBlock == null)
-                return false;
-
-            block = slim.FatBlock;
-            local = Vector3D.Transform(block.GetPosition(), grid.WorldMatrixNormalizedInv);
-            return true;
+            return CrewLookRay.TryGridUnderCrosshair(PaintRangeMeters, out grid);
         }
     }
 }

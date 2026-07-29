@@ -200,7 +200,7 @@ namespace HireCrew
             }
             else if (crew.Role == CrewRole.SalvageOps)
             {
-                sb.AppendLine("Job: Manual EVA salvage — pick a grid from HUD");
+                sb.AppendLine("Job: EVA salvage — /crew salvage then LMB; Salvage from HUD");
             }
             else
             {

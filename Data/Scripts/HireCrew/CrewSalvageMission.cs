@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
+using Sandbox.Definitions;
 using Sandbox.ModAPI;
+using VRage;
 using VRage.Game;
 using VRage.Game.ModAPI;
 using VRage.Game.ModAPI.Interfaces;
 using VRage.ModAPI;
+using VRage.ObjectBuilders;
 using VRage.Utils;
 using VRageMath;
 
@@ -19,7 +22,15 @@ namespace HireCrew
         {
             public string CrewId;
             public long HomeGridEntityId;
+            /// <summary>Grid currently being ground (updates as debris fragments change).</summary>
             public long TargetGridEntityId;
+            public bool HasZone;
+            public double ZoneMinX;
+            public double ZoneMinY;
+            public double ZoneMinZ;
+            public double ZoneMaxX;
+            public double ZoneMaxY;
+            public double ZoneMaxZ;
             public SalvageMissionState State;
             public double StateSeconds;
             public int Hints;
@@ -35,6 +46,15 @@ namespace HireCrew
             public double FwdX;
             public double FwdY;
             public double FwdZ;
+            public bool NotifiedCreativeRefund;
+            /// <summary>Stable hover for current TargetCell (avoids chasing a moving approach point).</summary>
+            public bool HasApproachHover;
+            public double HoverX;
+            public double HoverY;
+            public double HoverZ;
+            public double NoGrindProgressSeconds;
+            public Vector3I SkipCell;
+            public bool HasSkipCell;
         }
 
         private static readonly Dictionary<string, MissionRuntime> ByCrew =
@@ -44,6 +64,17 @@ namespace HireCrew
         private static readonly List<IMySlimBlock> BlockScratch = new List<IMySlimBlock>(256);
         private static readonly List<IMyInventory> InvScratch = new List<IMyInventory>(64);
         private static readonly List<IMyCubeGrid> GridGroupScratch = new List<IMyCubeGrid>(8);
+        private static readonly HashSet<IMyEntity> EntityScratch = new HashSet<IMyEntity>();
+        private static readonly HashSet<Vector3I> NeighborPosScratch = new HashSet<Vector3I>();
+        private static readonly Vector3I[] OrthoDirs =
+        {
+            new Vector3I(1, 0, 0),
+            new Vector3I(-1, 0, 0),
+            new Vector3I(0, 1, 0),
+            new Vector3I(0, -1, 0),
+            new Vector3I(0, 0, 1),
+            new Vector3I(0, 0, -1)
+        };
 
         public static bool IsCrewOnMission(string crewId)
         {
@@ -115,12 +146,13 @@ namespace HireCrew
             if (targetGrid != null && TryResolveTarget(m, targetGrid, out slim) && slim != null)
             {
                 Vector3D targetPos = GetSlimWorld(slim, targetGrid);
-                Vector3D outward = targetPos - targetGrid.WorldAABB.Center;
-                if (outward.LengthSquared() < 0.01)
-                    outward = seat.WorldMatrix.Forward;
-                outward.Normalize();
-                pos = targetPos + outward * CrewConfig.SalvageEvaStandOffMeters;
-                forward = -outward;
+                Vector3D from = seat.GetPosition();
+                pos = ComputeApproachHover(from, targetPos, targetGrid);
+                Vector3D toBlock = targetPos - pos;
+                if (toBlock.LengthSquared() < 0.01)
+                    toBlock = -seat.WorldMatrix.Forward;
+                toBlock.Normalize();
+                forward = toBlock;
                 return true;
             }
 
@@ -129,13 +161,19 @@ namespace HireCrew
             return true;
         }
 
-        public static bool DispatchCrew(CrewSession session, string crewId, long targetGridEntityId)
+        public static bool DispatchCrew(
+            CrewSession session,
+            string crewId,
+            BoundingBoxD zone,
+            long seedGridEntityId)
         {
             if (session == null || session.Store == null || string.IsNullOrEmpty(crewId))
                 return false;
             if (IsCrewOnMission(crewId))
                 return false;
-            if (targetGridEntityId == 0)
+            if (!CrewSalvageRules.IsValidZone(
+                    zone.Min.X, zone.Min.Y, zone.Min.Z,
+                    zone.Max.X, zone.Max.Y, zone.Max.Z))
                 return false;
 
             var crew = session.Store.Get(crewId);
@@ -153,18 +191,8 @@ namespace HireCrew
             if (!CanStartAnotherOnGrid(crew.GridEntityId))
                 return false;
 
-            IMyEntity targetEnt;
-            if (!MyAPIGateway.Entities.TryGetEntityById(targetGridEntityId, out targetEnt))
-                return false;
-            var target = targetEnt as IMyCubeGrid;
-            if (target == null || target.Closed)
-                return false;
-
             double radius = CrewConfig.SalvageScanRadiusMeters;
-            if (Vector3D.DistanceSquared(home.WorldAABB.Center, target.WorldAABB.Center) > radius * radius)
-                return false;
-
-            if (!IsLegalTargetGrid(crew, target))
+            if (Vector3D.DistanceSquared(home.WorldAABB.Center, zone.Center) > radius * radius)
                 return false;
 
             Vector3D from = home.WorldAABB.Center;
@@ -180,19 +208,33 @@ namespace HireCrew
             {
                 CrewId = crew.CrewId,
                 HomeGridEntityId = crew.GridEntityId,
-                TargetGridEntityId = targetGridEntityId,
+                TargetGridEntityId = seedGridEntityId,
+                HasZone = true,
+                ZoneMinX = zone.Min.X,
+                ZoneMinY = zone.Min.Y,
+                ZoneMinZ = zone.Min.Z,
+                ZoneMaxX = zone.Max.X,
+                ZoneMaxY = zone.Max.Y,
+                ZoneMaxZ = zone.Max.Z,
                 State = SalvageMissionState.EvaTransit,
                 StateSeconds = 0
             };
 
             IMySlimBlock first;
-            if (!TryPickNearestBlock(target, from, out first) || first == null)
+            IMyCubeGrid firstGrid;
+            if (!TryPickBlockInZone(m, home, crew, from, out first, out firstGrid) || first == null)
+            {
+                // Zone already empty — drop the mark so the highlight goes away.
+                if (session != null)
+                    session.ClearSalvageMarkForHome(home.EntityId);
                 return false;
+            }
             SetTarget(m, first);
 
             ByCrew[crew.CrewId] = m;
             Log("salvage dispatch crew=" + crew.CrewId
                 + " home=" + m.HomeGridEntityId
+                + " zoneSeed=" + seedGridEntityId
                 + " target=" + m.TargetGridEntityId);
             return true;
         }
@@ -207,6 +249,130 @@ namespace HireCrew
             BeginReturn(m);
             Log("salvage recall crew=" + crewId);
             return true;
+        }
+
+        /// <summary>Clear / recall: <paramref name="newTargetGridEntityId"/> 0 returns all home sorties.</summary>
+        public static int RetargetHomeMissions(IMyCubeGrid home, long newTargetGridEntityId)
+        {
+            if (newTargetGridEntityId == 0)
+                return RetargetHomeMissions(home, default(BoundingBoxD), 0, clear: true);
+
+            IMyEntity tEnt;
+            if (!MyAPIGateway.Entities.TryGetEntityById(newTargetGridEntityId, out tEnt) || tEnt == null)
+                return 0;
+            var newTarget = tEnt as IMyCubeGrid;
+            if (newTarget == null || newTarget.Closed)
+                return 0;
+            return RetargetHomeMissions(home, SalvageTargetStore.BuildZoneFromGrid(newTarget), newTargetGridEntityId, clear: false);
+        }
+
+        /// <summary>
+        /// Active Salvage Ops from <paramref name="home"/> switch to a new zone (or return if clear).
+        /// </summary>
+        public static int RetargetHomeMissions(IMyCubeGrid home, BoundingBoxD zone, long seedGridEntityId)
+        {
+            return RetargetHomeMissions(home, zone, seedGridEntityId, clear: false);
+        }
+
+        private static int RetargetHomeMissions(
+            IMyCubeGrid home,
+            BoundingBoxD zone,
+            long seedGridEntityId,
+            bool clear)
+        {
+            if (home == null || ByCrew.Count == 0)
+                return 0;
+
+            int n = 0;
+            CopyCrewKeys(KeyScratch);
+            for (int i = 0; i < KeyScratch.Count; i++)
+            {
+                MissionRuntime m;
+                if (!ByCrew.TryGetValue(KeyScratch[i], out m) || m == null)
+                    continue;
+
+                IMyEntity homeEnt;
+                IMyCubeGrid missionHome = null;
+                if (MyAPIGateway.Entities.TryGetEntityById(m.HomeGridEntityId, out homeEnt))
+                    missionHome = homeEnt as IMyCubeGrid;
+                if (missionHome == null || missionHome.Closed)
+                    continue;
+                if (missionHome.EntityId != home.EntityId && !missionHome.IsSameConstructAs(home))
+                    continue;
+
+                if (clear)
+                {
+                    BeginReturn(m);
+                    n++;
+                    continue;
+                }
+
+                Vector3D from = home.WorldAABB.Center;
+                IMyCharacter character;
+                CrewRecord crew = null;
+                var session = CrewSession.Instance;
+                if (session != null && session.Store != null)
+                {
+                    crew = session.Store.Get(m.CrewId);
+                    if (crew != null && TryGetCharacter(crew, out character)
+                        && character != null && !character.Closed)
+                        from = character.GetPosition();
+                }
+
+                m.HasZone = true;
+                m.ZoneMinX = zone.Min.X;
+                m.ZoneMinY = zone.Min.Y;
+                m.ZoneMinZ = zone.Min.Z;
+                m.ZoneMaxX = zone.Max.X;
+                m.ZoneMaxY = zone.Max.Y;
+                m.ZoneMaxZ = zone.Max.Z;
+                m.TargetGridEntityId = seedGridEntityId;
+
+                IMySlimBlock first;
+                IMyCubeGrid firstGrid;
+                if (!TryPickBlockInZone(m, home, crew, from, out first, out firstGrid) || first == null)
+                {
+                    BeginReturnZoneDone(m);
+                    n++;
+                    continue;
+                }
+
+                ClearTarget(m);
+                SetTarget(m, first);
+                ClearFlyDynamics(m);
+                m.State = SalvageMissionState.EvaTransit;
+                m.StateSeconds = 0;
+                m.Hints = 0;
+                m.NotifiedCargoFull = false;
+                n++;
+                Log("salvage retarget crew=" + m.CrewId + " zoneSeed=" + seedGridEntityId);
+            }
+            return n;
+        }
+
+        public static int RecallMissionsOnManagedHomes(
+            long identityId,
+            Func<long, IMyCubeGrid, bool> canManage)
+        {
+            if (canManage == null || ByCrew.Count == 0)
+                return 0;
+            int n = 0;
+            CopyCrewKeys(KeyScratch);
+            for (int i = 0; i < KeyScratch.Count; i++)
+            {
+                MissionRuntime m;
+                if (!ByCrew.TryGetValue(KeyScratch[i], out m) || m == null)
+                    continue;
+                IMyEntity homeEnt;
+                IMyCubeGrid home = null;
+                if (MyAPIGateway.Entities.TryGetEntityById(m.HomeGridEntityId, out homeEnt))
+                    home = homeEnt as IMyCubeGrid;
+                if (home == null || !canManage(identityId, home))
+                    continue;
+                BeginReturn(m);
+                n++;
+            }
+            return n;
         }
 
         public static void Tick(CrewSession session)
@@ -251,16 +417,6 @@ namespace HireCrew
                     continue;
                 }
 
-                IMyEntity targetEnt;
-                IMyCubeGrid target = null;
-                if (MyAPIGateway.Entities.TryGetEntityById(m.TargetGridEntityId, out targetEnt))
-                    target = targetEnt as IMyCubeGrid;
-                if (target == null || target.Closed)
-                {
-                    BeginReturn(m);
-                    continue;
-                }
-
                 IMyTerminalBlock seat = null;
                 if (crew.SeatEntityId.HasValue)
                 {
@@ -271,6 +427,24 @@ namespace HireCrew
 
                 IMyCharacter character;
                 TryGetCharacter(crew, out character);
+
+                Vector3D fromPos = character != null && !character.Closed
+                    ? character.GetPosition()
+                    : (seat != null ? seat.GetPosition() : home.WorldAABB.Center);
+
+                IMyCubeGrid target = ResolveMissionTargetGrid(m);
+                if (target == null || target.Closed)
+                {
+                    IMySlimBlock next;
+                    IMyCubeGrid nextGrid;
+                    if (!TryPickBlockInZone(m, home, crew, fromPos, out next, out nextGrid) || next == null)
+                    {
+                        BeginReturnZoneDone(m);
+                        continue;
+                    }
+                    SetTarget(m, next);
+                    target = nextGrid;
+                }
 
                 m.StateSeconds += dt;
                 m.PoseCooldown = Math.Max(0, m.PoseCooldown - dt);
@@ -325,30 +499,32 @@ namespace HireCrew
                     IMyCubeGrid home = null;
                     if (MyAPIGateway.Entities.TryGetEntityById(m.HomeGridEntityId, out homeEnt))
                         home = homeEnt as IMyCubeGrid;
-                    IMyEntity targetEnt;
-                    IMyCubeGrid target = null;
-                    if (MyAPIGateway.Entities.TryGetEntityById(m.TargetGridEntityId, out targetEnt))
-                        target = targetEnt as IMyCubeGrid;
-                    if (home == null || target == null)
+                    if (home == null)
                     {
                         BeginReturn(m);
                         continue;
                     }
 
+                    IMyCubeGrid target = ResolveMissionTargetGrid(m);
                     IMySlimBlock slim;
-                    if (!TryResolveTarget(m, target, out slim) || slim == null || slim.IsDestroyed)
+                    if (target == null
+                        || !TryResolveTarget(m, target, out slim)
+                        || slim == null
+                        || slim.IsDestroyed)
                     {
-                        Vector3D from = target.WorldAABB.Center;
-                        if (!TryPickNearestBlock(target, from, out slim) || slim == null)
+                        IMyCubeGrid nextGrid;
+                        if (!TryPickBlockInZone(m, home, crew, home.WorldAABB.Center, out slim, out nextGrid)
+                            || slim == null)
                         {
-                            BeginReturn(m);
+                            BeginReturnZoneDone(m);
                             continue;
                         }
                         SetTarget(m, slim);
+                        target = nextGrid;
                     }
 
-                    float amount = CrewConfig.GetSalvageGrindMountPerSecond(crew.Stars) * (float)dt;
-                    GrindResult result = TryGrindTick(slim, home, amount);
+                    float amount = CrewConfig.GetSalvageGrindIntegrityPerSecond(crew.Stars) * (float)dt;
+                    GrindResult result = TryGrindTick(slim, home, null, amount, (float)dt);
                     if (result == GrindResult.CargoFull)
                     {
                         NotifyCargoFull(session, m, crew);
@@ -357,14 +533,24 @@ namespace HireCrew
                     }
                     if (result == GrindResult.Failed)
                     {
-                        BeginReturn(m);
+                        ClearTarget(m);
+                        IMyCubeGrid nextGrid;
+                        if (!TryPickBlockInZone(m, home, crew, home.WorldAABB.Center, out slim, out nextGrid)
+                            || slim == null)
+                            BeginReturnZoneDone(m);
+                        else
+                            SetTarget(m, slim);
                         continue;
                     }
-                    if (slim.IsDestroyed || !BlockStillPresent(target, m.TargetCell))
+                    if (result == GrindResult.Removed
+                        || slim.IsDestroyed
+                        || (target != null && !BlockStillPresent(target, m.TargetCell)))
                     {
                         ClearTarget(m);
-                        if (!TryPickNearestBlock(target, target.WorldAABB.Center, out slim) || slim == null)
-                            BeginReturn(m);
+                        IMyCubeGrid nextGrid;
+                        if (!TryPickBlockInZone(m, home, crew, home.WorldAABB.Center, out slim, out nextGrid)
+                            || slim == null)
+                            BeginReturnZoneDone(m);
                         else
                             SetTarget(m, slim);
                     }
@@ -400,38 +586,83 @@ namespace HireCrew
             IMySlimBlock slim;
             if (!TryResolveTarget(m, target, out slim) || slim == null || slim.IsDestroyed)
             {
-                if (!TryPickNearestBlock(target, fromPos, out slim) || slim == null)
+                IMyCubeGrid nextGrid;
+                if (!TryPickNextBlock(m, home, crew, fromPos, out slim, out nextGrid) || slim == null)
                 {
-                    BeginReturn(m);
+                    BeginReturnZoneDone(m);
                     return;
                 }
                 SetTarget(m, slim);
+                if (nextGrid != null)
+                    target = nextGrid;
             }
 
             Vector3D blockPos = GetSlimWorld(slim, target);
-            Vector3D outward = blockPos - target.WorldAABB.Center;
-            if (outward.LengthSquared() < 0.01)
-                outward = home.WorldMatrix.Forward;
-            outward.Normalize();
-            Vector3D hover = blockPos + outward * CrewConfig.SalvageEvaStandOffMeters;
+            Vector3D hover = GetOrCreateApproachHover(m, fromPos, blockPos, target);
+            Vector3D flyTo = hover;
+            Vector3D stage;
+            // Only stage while still away from the stage point — arriving there used to idle forever.
+            bool staging = NeedsSalvageStaging(target, fromPos, hover, out stage)
+                && Vector3D.DistanceSquared(fromPos, stage)
+                    > CrewConfig.SalvageEvaArriveMeters * CrewConfig.SalvageEvaArriveMeters;
+            if (staging)
+                flyTo = stage;
+
+            IMyCubeGrid flyGrid = target != null ? target : home;
+            double arrive = CrewConfig.SalvageEvaArriveMeters;
+            double arriveSq = arrive * arrive;
+            double grindR = CrewConfig.SalvageGrindRangeMeters;
+            double grindRSq = grindR * grindR;
 
             if (character != null && !character.Closed)
             {
-                FlyToward(m, character, home, hover, CrewConfig.GetSalvageEvaSpeedMeters(crew.Stars), dt);
-                double grindR = CrewConfig.SalvageGrindRangeMeters;
-                bool inRange = Vector3D.DistanceSquared(character.GetPosition(), blockPos) <= grindR * grindR;
-                bool atHover = Vector3D.DistanceSquared(character.GetPosition(), hover)
-                    <= CrewConfig.SalvageEvaArriveMeters * CrewConfig.SalvageEvaArriveMeters;
-                if (inRange || atHover)
+                Vector3D pos = character.GetPosition();
+                bool inRange = Vector3D.DistanceSquared(pos, blockPos) <= grindRSq;
+                bool atFlyTo = Vector3D.DistanceSquared(pos, flyTo) <= arriveSq;
+
+                if (inRange)
                 {
                     m.State = SalvageMissionState.Grinding;
                     m.StateSeconds = 0;
+                    m.NoGrindProgressSeconds = 0;
+                    return;
+                }
+
+                // Close enough to hover but still outside grind range — step in toward the block.
+                if (!staging && atFlyTo)
+                    flyTo = blockPos + (hover - blockPos) * 0.35;
+
+                FlyToward(m, character, flyGrid, flyTo, CrewConfig.GetSalvageEvaSpeedMeters(crew.Stars), dt);
+
+                pos = character.GetPosition();
+                if (Vector3D.DistanceSquared(pos, blockPos) <= grindRSq)
+                {
+                    m.State = SalvageMissionState.Grinding;
+                    m.StateSeconds = 0;
+                    m.NoGrindProgressSeconds = 0;
+                }
+                else if (m.StateSeconds > 45.0)
+                {
+                    // Pathing deadlock — snap into grind range beside the block.
+                    try
+                    {
+                        character.SetPosition(hover);
+                        character.WorldMatrix = MatrixD.CreateWorld(
+                            hover,
+                            Vector3D.Normalize(blockPos - hover),
+                            EvaUp(flyGrid, character));
+                    }
+                    catch { }
+                    m.State = SalvageMissionState.Grinding;
+                    m.StateSeconds = 0;
+                    m.NoGrindProgressSeconds = 0;
                 }
             }
             else if (m.StateSeconds > 2.0)
             {
                 m.State = SalvageMissionState.Grinding;
                 m.StateSeconds = 0;
+                m.NoGrindProgressSeconds = 0;
             }
         }
 
@@ -452,29 +683,44 @@ namespace HireCrew
             IMySlimBlock slim;
             if (!TryResolveTarget(m, target, out slim) || slim == null || slim.IsDestroyed)
             {
-                if (!TryPickNearestBlock(target, fromPos, out slim) || slim == null)
+                IMyCubeGrid nextGrid;
+                if (!TryPickNextBlock(m, home, crew, fromPos, out slim, out nextGrid) || slim == null)
                 {
-                    BeginReturn(m);
+                    BeginReturnZoneDone(m);
                     return;
                 }
                 SetTarget(m, slim);
+                if (nextGrid != null)
+                    target = nextGrid;
             }
 
             Vector3D blockPos = GetSlimWorld(slim, target);
+            double grindR = CrewConfig.SalvageGrindRangeMeters;
             if (character != null && !character.Closed)
             {
-                double grindR = CrewConfig.SalvageGrindRangeMeters;
-                if (Vector3D.DistanceSquared(character.GetPosition(), blockPos) > grindR * grindR)
+                double distSq = Vector3D.DistanceSquared(character.GetPosition(), blockPos);
+                // Soft re-approach while staying in Grinding — EvaTransit flip was the bounce.
+                if (distSq > grindR * grindR)
                 {
-                    m.State = SalvageMissionState.EvaTransit;
-                    m.StateSeconds = 0;
+                    Vector3D hover = GetOrCreateApproachHover(m, character.GetPosition(), blockPos, target);
+                    FlyToward(
+                        m,
+                        character,
+                        target ?? home,
+                        hover,
+                        CrewConfig.GetSalvageEvaSpeedMeters(crew.Stars) * 0.7f,
+                        dt);
                     return;
                 }
-                HoldGrindPose(m, character, home, blockPos, dt);
+                HoldGrindPose(m, character, target ?? home, blockPos, dt);
             }
 
-            float amount = CrewConfig.GetSalvageGrindMountPerSecond(crew.Stars) * dt;
-            GrindResult result = TryGrindTick(slim, home, amount);
+            float beforeIntegrity = 0f;
+            try { beforeIntegrity = slim.Integrity; }
+            catch { }
+
+            float amount = CrewConfig.GetSalvageGrindIntegrityPerSecond(crew.Stars) * dt;
+            GrindResult result = TryGrindTick(slim, home, character, amount, dt);
             if (result == GrindResult.CargoFull)
             {
                 NotifyCargoFull(session, m, crew);
@@ -483,65 +729,536 @@ namespace HireCrew
             }
             if (result == GrindResult.Failed)
             {
-                BeginReturn(m);
+                SkipCurrentBlock(m, home, crew, target, fromPos);
                 return;
             }
 
-            if (slim.IsDestroyed || !BlockStillPresent(target, m.TargetCell))
+            if (result == GrindResult.Removed
+                || slim.IsDestroyed
+                || !BlockStillPresent(target, m.TargetCell))
             {
+                m.HasSkipCell = false;
                 ClearTarget(m);
-                if (!TryPickNearestBlock(target, fromPos, out slim) || slim == null)
-                    BeginReturn(m);
-                else
-                    SetTarget(m, slim);
+                IMyCubeGrid nextGrid;
+                if (!TryPickNextBlock(m, home, crew, fromPos, out slim, out nextGrid) || slim == null)
+                {
+                    BeginReturnZoneDone(m);
+                    return;
+                }
+                SetTarget(m, slim);
+                if (nextGrid != null)
+                    target = nextGrid;
+                // New leaf may be across the wreck — EVA only then, not for same-cell drift.
+                if (character != null && !character.Closed)
+                {
+                    Vector3D nextPos = GetSlimWorld(slim, target);
+                    double nextDistSq = Vector3D.DistanceSquared(character.GetPosition(), nextPos);
+                    if (CrewSalvageRules.NeedsEvaAfterRetarget(nextDistSq, grindR))
+                    {
+                        m.State = SalvageMissionState.EvaTransit;
+                        m.StateSeconds = 0;
+                    }
+                }
+                return;
             }
+
+            float afterIntegrity = beforeIntegrity;
+            try { afterIntegrity = slim.Integrity; }
+            catch { }
+            bool madeProgress = afterIntegrity < beforeIntegrity - 0.01f;
+            if (madeProgress)
+                m.NoGrindProgressSeconds = 0;
+            else
+            {
+                m.NoGrindProgressSeconds += dt;
+                if (m.NoGrindProgressSeconds > 2.5)
+                    SkipCurrentBlock(m, home, crew, target, fromPos);
+            }
+        }
+
+        private static void SkipCurrentBlock(
+            MissionRuntime m,
+            IMyCubeGrid home,
+            CrewRecord crew,
+            IMyCubeGrid target,
+            Vector3D fromPos)
+        {
+            if (m == null) return;
+            if (m.HasTargetCell)
+            {
+                m.SkipCell = m.TargetCell;
+                m.HasSkipCell = true;
+            }
+            ClearTarget(m);
+            IMySlimBlock next;
+            IMyCubeGrid nextGrid;
+            if (!TryPickNextBlock(m, home, crew, fromPos, out next, out nextGrid) || next == null)
+                BeginReturnZoneDone(m);
+            else
+                SetTarget(m, next);
+            m.NoGrindProgressSeconds = 0;
+            m.State = SalvageMissionState.EvaTransit;
+            m.StateSeconds = 0;
         }
 
         private enum GrindResult
         {
             Ok = 0,
             CargoFull = 1,
-            Failed = 2
+            Failed = 2,
+            Removed = 3
         }
 
-        private static GrindResult TryGrindTick(IMySlimBlock slim, IMyCubeGrid homeGrid, float grindSeconds)
+        private static GrindResult TryGrindTick(
+            IMySlimBlock slim,
+            IMyCubeGrid homeGrid,
+            IMyCharacter character,
+            float integrityDelta,
+            float dt)
         {
-            if (slim == null || homeGrid == null || grindSeconds <= 0f)
+            if (slim == null || homeGrid == null || integrityDelta <= 0f)
                 return GrindResult.Failed;
 
-            IMyInventory inv = FindDepositInventory(homeGrid);
-            if (inv == null)
+            // Always grind into the character first — DecreaseMountLevel into remote cargo often
+            // leaves comps on the block stockpile (lost on RemoveBlock). Then push to cargo.
+            IMyInventory buffer = GetCharacterInventory(character);
+            CollectDepositInventories(homeGrid, InvScratch);
+            if (InvScratch.Count == 0 && buffer == null)
                 return GrindResult.CargoFull;
 
-            try
+            if (!HomeHasFreeVolume(homeGrid) && !HasCharacterInventorySpace(character))
+                return GrindResult.CargoFull;
+
+            // Cap so a single tick cannot erase a whole block (loses component payout).
+            float maxIntegrity = 1f;
+            try { maxIntegrity = Math.Max(1f, slim.MaxIntegrity); }
+            catch { }
+            if (dt < 0.001f) dt = 0.001f;
+            float maxStep = maxIntegrity * CrewConfig.SalvageGrindMaxIntegrityFractionPerSecond * dt;
+            if (integrityDelta > maxStep)
+                integrityDelta = maxStep;
+
+            // Finish stubborn last percent with a decisive dismount.
+            float buildRatio = 1f;
+            try { buildRatio = slim.BuildLevelRatio; }
+            catch { }
+            if (IsReadyToFinish(slim, buildRatio))
+                return FinishDismountAndRemove(slim, homeGrid, character);
+
+            float beforeIntegrity = 0f;
+            float beforeBuild = buildRatio;
+            try { beforeIntegrity = slim.Integrity; }
+            catch { beforeIntegrity = 0f; }
+
+            bool creative = IsCreativeWorld();
+            bool progressed = false;
+            if (buffer != null && InventoryHasSpace(buffer))
             {
-                slim.DecreaseMountLevel(grindSeconds, inv);
+                if (TryDecreaseMount(slim, buffer, integrityDelta, beforeIntegrity, beforeBuild))
+                    progressed = true;
             }
-            catch
+
+            // Fallback: grind straight into a cargo inventory that accepts components.
+            for (int i = 0; i < InvScratch.Count && !progressed; i++)
             {
-                return GrindResult.Failed;
+                var inv = InvScratch[i];
+                if (!InventoryHasSpace(inv) || !InventoryAcceptsComponents(inv))
+                    continue;
+                if (TryDecreaseMount(slim, inv, integrityDelta, beforeIntegrity, beforeBuild))
+                    progressed = true;
             }
+
+            if (buffer != null)
+            {
+                try { slim.MoveItemsFromConstructionStockpile(buffer); }
+                catch { }
+                TransferInventoryToHome(buffer, homeGrid);
+            }
+            FlushStockpileToBufferThenHome(slim, buffer, homeGrid);
+
+            try { buildRatio = slim.BuildLevelRatio; }
+            catch { }
+
+            // Keen drops no grind comps in Creative — spawn a recipe-fraction refund into home cargo.
+            if (creative && (progressed || beforeBuild - buildRatio > 0.0005f))
+                DepositCreativeRefund(slim, homeGrid, beforeBuild - buildRatio);
+
+            if (IsReadyToFinish(slim, buildRatio))
+                return FinishDismountAndRemove(slim, homeGrid, character);
+
+            if (!progressed)
+            {
+                if (!HomeHasFreeVolume(homeGrid) && !HasCharacterInventorySpace(character))
+                    return GrindResult.CargoFull;
+                return GrindResult.Ok;
+            }
+
             return GrindResult.Ok;
         }
 
-        private static IMyInventory FindDepositInventory(IMyCubeGrid homeGrid)
+        private static bool IsReadyToFinish(IMySlimBlock slim, float buildRatio)
         {
-            CollectHomeInventories(homeGrid, InvScratch);
+            if (slim == null) return true;
+            try
+            {
+                if (slim.IsDestroyed || slim.IsFullyDismounted)
+                    return true;
+                if (buildRatio <= 0.05f)
+                    return true;
+                if (slim.Integrity <= 0.05f)
+                    return true;
+            }
+            catch
+            {
+                try { return slim.IsDestroyed; }
+                catch { return false; }
+            }
+            return false;
+        }
+
+        private static bool InventoryHasSpace(IMyInventory inv)
+        {
+            if (inv == null) return false;
+            try { return inv.CurrentVolume < inv.MaxVolume; }
+            catch { return false; }
+        }
+
+        private static bool TryDecreaseMount(
+            IMySlimBlock slim,
+            IMyInventory inv,
+            float integrityDelta,
+            float beforeIntegrity,
+            float beforeBuild)
+        {
+            if (slim == null || inv == null || integrityDelta <= 0f)
+                return false;
+            try
+            {
+                // true = vanilla deconstruct efficiency (no real grinder tool equipped).
+                slim.DecreaseMountLevel(integrityDelta, inv, true);
+            }
+            catch { return false; }
+
+            try { slim.MoveItemsFromConstructionStockpile(inv); }
+            catch { }
+
+            try
+            {
+                if (slim.Integrity < beforeIntegrity - 0.01f)
+                    return true;
+                if (slim.BuildLevelRatio < beforeBuild - 0.0005f)
+                    return true;
+            }
+            catch { }
+            return false;
+        }
+
+        private static GrindResult FinishDismountAndRemove(
+            IMySlimBlock slim,
+            IMyCubeGrid homeGrid,
+            IMyCharacter character)
+        {
+            if (slim == null)
+                return GrindResult.Removed;
+
+            float remainBuild = 1f;
+            try { remainBuild = slim.BuildLevelRatio; }
+            catch { }
+
+            IMyInventory buffer = GetCharacterInventory(character);
+            CollectDepositInventories(homeGrid, InvScratch);
+
+            // Prefer character — FullyDismount into distant cargo often drops comps.
+            IMyInventory primary = null;
+            if (buffer != null && InventoryHasSpace(buffer))
+                primary = buffer;
+            if (primary == null)
+            {
+                for (int i = 0; i < InvScratch.Count; i++)
+                {
+                    if (InventoryHasSpace(InvScratch[i]) && InventoryAcceptsComponents(InvScratch[i]))
+                    {
+                        primary = InvScratch[i];
+                        break;
+                    }
+                }
+            }
+
+            if (primary != null)
+            {
+                try { slim.FullyDismount(primary); }
+                catch { }
+                try { slim.MoveItemsFromConstructionStockpile(primary); }
+                catch { }
+                try { slim.ClearConstructionStockpile(primary); }
+                catch { }
+            }
+
+            FlushStockpileToBufferThenHome(slim, buffer, homeGrid);
+            if (buffer != null)
+                TransferInventoryToHome(buffer, homeGrid);
+
+            // Creative: FullyDismount still yields nothing — refund whatever build ratio remained.
+            if (IsCreativeWorld() && remainBuild > 0.001f)
+                DepositCreativeRefund(slim, homeGrid, remainBuild);
+
+            try
+            {
+                IMyCubeGrid g = slim.CubeGrid;
+                if (g != null)
+                    g.RemoveBlock(slim, true);
+            }
+            catch { }
+
+            return GrindResult.Removed;
+        }
+
+        private static bool IsCreativeWorld()
+        {
+            try
+            {
+                return MyAPIGateway.Session != null && MyAPIGateway.Session.CreativeMode;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// Creative worlds discard grind loot. Deposit <paramref name="buildFraction"/> of the
+        /// block recipe into home cargo (approx. same payout as survival grinding).
+        /// </summary>
+        private static void DepositCreativeRefund(IMySlimBlock slim, IMyCubeGrid homeGrid, float buildFraction)
+        {
+            if (slim == null || homeGrid == null || buildFraction <= 0.0005f)
+                return;
+
+            MyCubeBlockDefinition def = null;
+            try { def = slim.BlockDefinition as MyCubeBlockDefinition; }
+            catch { }
+            if (def == null || def.Components == null || def.Components.Length == 0)
+                return;
+
+            CollectDepositInventories(homeGrid, InvScratch);
+            if (InvScratch.Count == 0)
+                return;
+
+            if (buildFraction > 1f) buildFraction = 1f;
+
+            for (int c = 0; c < def.Components.Length; c++)
+            {
+                var comp = def.Components[c];
+                if (comp == null || comp.Definition == null || comp.Count <= 0)
+                    continue;
+
+                int give = (int)Math.Floor(comp.Count * buildFraction + 0.0001);
+                if (give <= 0 && buildFraction >= 0.05f && comp.Count > 0)
+                    give = 1;
+                if (give <= 0)
+                    continue;
+
+                MyDefinitionId id = comp.Definition.Id;
+                if (!TryAddItemsToHome(homeGrid, id, give))
+                    break;
+            }
+
+            TryNotifyCreativeRefund(homeGrid);
+        }
+
+        private static bool TryAddItemsToHome(IMyCubeGrid homeGrid, MyDefinitionId id, int amount)
+        {
+            if (homeGrid == null || amount <= 0)
+                return false;
+            CollectDepositInventories(homeGrid, InvScratch);
+            int remaining = amount;
+            for (int h = 0; h < InvScratch.Count && remaining > 0; h++)
+            {
+                var inv = InvScratch[h];
+                if (inv == null || !InventoryHasSpace(inv))
+                    continue;
+                int batch = remaining;
+                for (int attempt = 0; attempt < 8 && batch > 0; attempt++)
+                {
+                    try
+                    {
+                        if (!inv.CanItemsBeAdded(batch, id))
+                        {
+                            batch /= 2;
+                            if (batch <= 0) break;
+                            continue;
+                        }
+                        var ob = MyObjectBuilderSerializer.CreateNewObject(id) as MyObjectBuilder_PhysicalObject;
+                        if (ob == null)
+                            return remaining < amount;
+                        inv.AddItems(batch, ob);
+                        remaining -= batch;
+                        break;
+                    }
+                    catch
+                    {
+                        batch /= 2;
+                    }
+                }
+            }
+            return remaining < amount;
+        }
+
+        private static void TryNotifyCreativeRefund(IMyCubeGrid homeGrid)
+        {
+            // One chat tip per active salvage mission that first deposits a creative refund.
+            foreach (var kv in ByCrew)
+            {
+                var m = kv.Value;
+                if (m == null || m.NotifiedCreativeRefund)
+                    continue;
+                if (homeGrid != null && m.HomeGridEntityId != 0)
+                {
+                    IMyEntity ent;
+                    IMyCubeGrid home = null;
+                    if (MyAPIGateway.Entities.TryGetEntityById(m.HomeGridEntityId, out ent))
+                        home = ent as IMyCubeGrid;
+                    if (home != null && !home.IsSameConstructAs(homeGrid))
+                        continue;
+                }
+                m.NotifiedCreativeRefund = true;
+                var session = CrewSession.Instance;
+                if (session == null || session.Store == null)
+                    return;
+                var crew = session.Store.Get(m.CrewId);
+                if (crew == null)
+                    return;
+                session.NotifyCrewOwners(
+                    crew,
+                    "Salvage: Creative world — Keen drops no grind loot; HireCrew is refunding comps to cargo");
+                return;
+            }
+        }
+
+        private static bool HasCharacterInventory(IMyCharacter character)
+        {
+            return GetCharacterInventory(character) != null;
+        }
+
+        private static bool HasCharacterInventorySpace(IMyCharacter character)
+        {
+            var inv = GetCharacterInventory(character);
+            if (inv == null) return false;
+            try { return inv.CurrentVolume < inv.MaxVolume; }
+            catch { return false; }
+        }
+
+        private static IMyInventory GetCharacterInventory(IMyCharacter character)
+        {
+            if (character == null || character.Closed)
+                return null;
+            try
+            {
+                if (!character.HasInventory)
+                    return null;
+                return character.GetInventory(0) as IMyInventory;
+            }
+            catch { return null; }
+        }
+
+        private static bool HomeHasFreeVolume(IMyCubeGrid homeGrid)
+        {
+            CollectDepositInventories(homeGrid, InvScratch);
             for (int i = 0; i < InvScratch.Count; i++)
             {
                 var inv = InvScratch[i];
                 if (inv == null) continue;
-                try
-                {
-                    if (inv.CurrentVolume < inv.MaxVolume)
-                        return inv;
-                }
-                catch { }
+                if (!InventoryHasSpace(inv) || !InventoryAcceptsComponents(inv))
+                    continue;
+                return true;
             }
-            return null;
+            return false;
         }
 
-        private static void CollectHomeInventories(IMyCubeGrid grid, List<IMyInventory> into)
+        private static void TransferInventoryToHome(IMyInventory from, IMyCubeGrid homeGrid)
+        {
+            if (from == null || homeGrid == null)
+                return;
+            CollectDepositInventories(homeGrid, InvScratch);
+            if (InvScratch.Count == 0)
+                return;
+
+            for (int pass = 0; pass < 12; pass++)
+            {
+                int count = 0;
+                try { count = from.ItemCount; }
+                catch { return; }
+                if (count <= 0)
+                    return;
+
+                bool movedAny = false;
+                for (int i = count - 1; i >= 0; i--)
+                {
+                    MyFixedPoint amount = 0;
+                    try
+                    {
+                        var item = from.GetItemAt(i);
+                        if (item == null)
+                            continue;
+                        amount = item.Value.Amount;
+                    }
+                    catch { continue; }
+                    if (amount <= 0)
+                        continue;
+
+                    for (int h = 0; h < InvScratch.Count; h++)
+                    {
+                        var to = InvScratch[h];
+                        if (to == null || !InventoryHasSpace(to) || !InventoryAcceptsComponents(to))
+                            continue;
+                        int beforeCount = count;
+                        try
+                        {
+                            from.TransferItemTo(to, i, null, true, amount);
+                        }
+                        catch { continue; }
+
+                        try { count = from.ItemCount; }
+                        catch { return; }
+                        if (count < beforeCount)
+                        {
+                            movedAny = true;
+                            break;
+                        }
+                    }
+                }
+                if (!movedAny)
+                    return;
+            }
+        }
+
+        private static void FlushStockpileToBufferThenHome(
+            IMySlimBlock slim,
+            IMyInventory buffer,
+            IMyCubeGrid homeGrid)
+        {
+            if (slim == null) return;
+
+            if (buffer != null)
+            {
+                try { slim.MoveItemsFromConstructionStockpile(buffer); }
+                catch { }
+                try { slim.ClearConstructionStockpile(buffer); }
+                catch { }
+                TransferInventoryToHome(buffer, homeGrid);
+            }
+
+            CollectDepositInventories(homeGrid, InvScratch);
+            for (int i = 0; i < InvScratch.Count; i++)
+            {
+                var inv = InvScratch[i];
+                if (inv == null) continue;
+                try { slim.MoveItemsFromConstructionStockpile(inv); }
+                catch { }
+                try { slim.ClearConstructionStockpile(inv); }
+                catch { }
+            }
+        }
+
+        /// <summary>Cargo containers (+ connectors) on the home physical group — not turrets/cockpits.</summary>
+        private static void CollectDepositInventories(IMyCubeGrid grid, List<IMyInventory> into)
         {
             into.Clear();
             if (grid == null) return;
@@ -565,11 +1282,11 @@ namespace HireCrew
                     continue;
                 if (other != grid && !GridsShareCargoAccess(grid, other))
                     continue;
-                AppendGridInventories(other, into);
+                AppendDepositInventories(other, into);
             }
         }
 
-        private static void AppendGridInventories(IMyCubeGrid grid, List<IMyInventory> into)
+        private static void AppendDepositInventories(IMyCubeGrid grid, List<IMyInventory> into)
         {
             if (grid == null) return;
             BlockScratch.Clear();
@@ -578,6 +1295,8 @@ namespace HireCrew
             {
                 var fat = BlockScratch[i] != null ? BlockScratch[i].FatBlock : null;
                 if (fat == null || fat.Closed || !fat.HasInventory)
+                    continue;
+                if (!(fat is IMyCargoContainer) && !(fat is IMyShipConnector))
                     continue;
                 int n = 0;
                 try { n = fat.InventoryCount; }
@@ -593,6 +1312,16 @@ namespace HireCrew
                     catch { }
                 }
             }
+        }
+
+        private static readonly MyDefinitionId SteelPlateId =
+            new MyDefinitionId(typeof(MyObjectBuilder_Component), "SteelPlate");
+
+        private static bool InventoryAcceptsComponents(IMyInventory inv)
+        {
+            if (inv == null) return false;
+            try { return inv.CanItemsBeAdded(1, SteelPlateId); }
+            catch { return true; }
         }
 
         private static bool GridsShareCargoAccess(IMyCubeGrid a, IMyCubeGrid b)
@@ -683,7 +1412,11 @@ namespace HireCrew
             return n < max;
         }
 
-        private static bool TryPickNearestBlock(IMyCubeGrid grid, Vector3D from, out IMySlimBlock best)
+        private static bool TryPickNearestBlock(
+            IMyCubeGrid grid,
+            Vector3D from,
+            out IMySlimBlock best,
+            MissionRuntime m = null)
         {
             best = null;
             if (grid == null) return false;
@@ -691,21 +1424,207 @@ namespace HireCrew
             try { grid.GetBlocks(BlockScratch); }
             catch { return false; }
 
-            double bestDist = double.MaxValue;
+            int bestNeighbors = int.MaxValue;
+            double bestDistSq = double.MaxValue;
             for (int i = 0; i < BlockScratch.Count; i++)
             {
                 var slim = BlockScratch[i];
                 if (slim == null || slim.IsDestroyed)
                     continue;
+                if (m != null && m.HasSkipCell && slim.Position == m.SkipCell)
+                    continue;
                 Vector3D p = GetSlimWorld(slim, grid);
-                double d = Vector3D.DistanceSquared(from, p);
-                if (d < bestDist)
-                {
-                    bestDist = d;
-                    best = slim;
-                }
+                double distSq = Vector3D.DistanceSquared(from, p);
+                int neighbors = CountFaceNeighborBlocks(grid, slim);
+                if (!CrewSalvageRules.PreferGrindCandidate(
+                        neighbors, distSq, bestNeighbors, bestDistSq))
+                    continue;
+                bestNeighbors = neighbors;
+                bestDistSq = distSq;
+                best = slim;
             }
             return best != null;
+        }
+
+        /// <summary>
+        /// Distinct orthogonal neighbor blocks touching the slim's AABB faces.
+        /// Tips/edges score low; structural bridges score high.
+        /// </summary>
+        private static int CountFaceNeighborBlocks(IMyCubeGrid grid, IMySlimBlock slim)
+        {
+            if (grid == null || slim == null)
+                return 0;
+
+            NeighborPosScratch.Clear();
+            Vector3I min = slim.Min;
+            Vector3I max = slim.Max;
+
+            // Fast path: 1x1x1 armor / most wreck mass.
+            if (min == max)
+            {
+                for (int d = 0; d < OrthoDirs.Length; d++)
+                    TryAddNeighborBlock(grid, slim, min + OrthoDirs[d]);
+                return NeighborPosScratch.Count;
+            }
+
+            for (int y = min.Y; y <= max.Y; y++)
+            for (int z = min.Z; z <= max.Z; z++)
+            {
+                TryAddNeighborBlock(grid, slim, new Vector3I(max.X + 1, y, z));
+                TryAddNeighborBlock(grid, slim, new Vector3I(min.X - 1, y, z));
+            }
+            for (int x = min.X; x <= max.X; x++)
+            for (int z = min.Z; z <= max.Z; z++)
+            {
+                TryAddNeighborBlock(grid, slim, new Vector3I(x, max.Y + 1, z));
+                TryAddNeighborBlock(grid, slim, new Vector3I(x, min.Y - 1, z));
+            }
+            for (int x = min.X; x <= max.X; x++)
+            for (int y = min.Y; y <= max.Y; y++)
+            {
+                TryAddNeighborBlock(grid, slim, new Vector3I(x, y, max.Z + 1));
+                TryAddNeighborBlock(grid, slim, new Vector3I(x, y, min.Z - 1));
+            }
+            return NeighborPosScratch.Count;
+        }
+
+        private static void TryAddNeighborBlock(IMyCubeGrid grid, IMySlimBlock self, Vector3I cell)
+        {
+            IMySlimBlock other;
+            try { other = grid.GetCubeBlock(cell); }
+            catch { return; }
+            if (other == null || other == self)
+                return;
+            NeighborPosScratch.Add(other.Position);
+        }
+
+        private static Vector3D GetOrCreateApproachHover(
+            MissionRuntime m,
+            Vector3D fromPos,
+            Vector3D blockPos,
+            IMyCubeGrid target)
+        {
+            if (m != null && m.HasApproachHover)
+                return new Vector3D(m.HoverX, m.HoverY, m.HoverZ);
+
+            Vector3D hover = ComputeApproachHover(fromPos, blockPos, target);
+            if (m != null)
+            {
+                m.HoverX = hover.X;
+                m.HoverY = hover.Y;
+                m.HoverZ = hover.Z;
+                m.HasApproachHover = true;
+            }
+            return hover;
+        }
+
+        private static Vector3D ComputeApproachHover(Vector3D fromPos, Vector3D blockPos, IMyCubeGrid target)
+        {
+            Vector3D approach = fromPos - blockPos;
+            if (approach.LengthSquared() < 0.25 && target != null)
+                approach = blockPos - target.WorldAABB.Center;
+            if (approach.LengthSquared() < 0.01)
+                approach = Vector3D.Up;
+            approach.Normalize();
+            return blockPos + approach * CrewConfig.SalvageEvaStandOffMeters;
+        }
+
+        /// <summary>
+        /// When far and the wreck blocks the straight line to hover, skim the AABB surface first.
+        /// </summary>
+        private static bool NeedsSalvageStaging(
+            IMyCubeGrid grid,
+            Vector3D from,
+            Vector3D hover,
+            out Vector3D stage)
+        {
+            stage = hover;
+            if (grid == null)
+                return false;
+            if (Vector3D.DistanceSquared(from, hover) < 100.0)
+                return false;
+
+            BoundingBoxD shipBox = grid.WorldAABB;
+            BoundingBoxD padBox = shipBox.GetInflated(1.0);
+            bool inside = padBox.Contains(from) != ContainmentType.Disjoint;
+
+            IHitInfo hit;
+            bool rayHit = MyAPIGateway.Physics.CastRay(from, hover, out hit)
+                && hit != null
+                && hit.HitEntity != null;
+            IMyCubeGrid hitGrid = null;
+            if (rayHit)
+            {
+                hitGrid = hit.HitEntity as IMyCubeGrid;
+                if (hitGrid == null)
+                {
+                    var block = hit.HitEntity as IMyCubeBlock;
+                    if (block != null)
+                        hitGrid = block.CubeGrid;
+                }
+            }
+            bool blockedByShip = hitGrid != null && hitGrid.EntityId == grid.EntityId;
+            if (!inside && !blockedByShip)
+                return false;
+
+            // Stage near the hover on the outside of the wreck AABB.
+            Vector3D surface = ClosestPointOnAabbSurface(shipBox, hover);
+            Vector3D outward = surface - shipBox.Center;
+            if (outward.LengthSquared() < 0.01)
+                outward = hover - from;
+            if (outward.LengthSquared() < 0.01)
+                outward = Vector3D.Up;
+            outward.Normalize();
+            stage = surface + outward * 1.25;
+
+            // Keep staging close to the grind approach.
+            const double maxFromHover = 8.0;
+            Vector3D away = stage - hover;
+            double awayLen = away.Length();
+            if (awayLen > maxFromHover)
+                stage = hover + away * (maxFromHover / awayLen);
+
+            Vector3D toHover = hover - from;
+            Vector3D toStage = stage - from;
+            if (toHover.LengthSquared() > 0.01 && toStage.LengthSquared() > 0.01)
+            {
+                toHover.Normalize();
+                toStage.Normalize();
+                if (Vector3D.Dot(toHover, toStage) < 0.1)
+                    return false;
+            }
+
+            return Vector3D.DistanceSquared(stage, from) > 4.0;
+        }
+
+        private static Vector3D ClosestPointOnAabbSurface(BoundingBoxD box, Vector3D p)
+        {
+            bool outside = p.X < box.Min.X || p.X > box.Max.X
+                || p.Y < box.Min.Y || p.Y > box.Max.Y
+                || p.Z < box.Min.Z || p.Z > box.Max.Z;
+            if (outside)
+            {
+                return new Vector3D(
+                    Math.Max(box.Min.X, Math.Min(box.Max.X, p.X)),
+                    Math.Max(box.Min.Y, Math.Min(box.Max.Y, p.Y)),
+                    Math.Max(box.Min.Z, Math.Min(box.Max.Z, p.Z)));
+            }
+
+            double dxMin = p.X - box.Min.X;
+            double dxMax = box.Max.X - p.X;
+            double dyMin = p.Y - box.Min.Y;
+            double dyMax = box.Max.Y - p.Y;
+            double dzMin = p.Z - box.Min.Z;
+            double dzMax = box.Max.Z - p.Z;
+
+            double best = dxMin;
+            Vector3D result = new Vector3D(box.Min.X, p.Y, p.Z);
+            if (dxMax < best) { best = dxMax; result = new Vector3D(box.Max.X, p.Y, p.Z); }
+            if (dyMin < best) { best = dyMin; result = new Vector3D(p.X, box.Min.Y, p.Z); }
+            if (dyMax < best) { best = dyMax; result = new Vector3D(p.X, box.Max.Y, p.Z); }
+            if (dzMin < best) { best = dzMin; result = new Vector3D(p.X, p.Y, box.Min.Z); }
+            if (dzMax < best) { result = new Vector3D(p.X, p.Y, box.Max.Z); }
+            return result;
         }
 
         private static void SetTarget(MissionRuntime m, IMySlimBlock slim)
@@ -713,12 +1632,138 @@ namespace HireCrew
             if (m == null || slim == null) return;
             m.TargetCell = slim.Position;
             m.HasTargetCell = true;
+            m.HasApproachHover = false;
+            m.NoGrindProgressSeconds = 0;
+            try
+            {
+                if (slim.CubeGrid != null)
+                    m.TargetGridEntityId = slim.CubeGrid.EntityId;
+            }
+            catch { }
+        }
+
+        private static IMyCubeGrid ResolveMissionTargetGrid(MissionRuntime m)
+        {
+            if (m == null || m.TargetGridEntityId == 0)
+                return null;
+            IMyEntity ent;
+            if (!MyAPIGateway.Entities.TryGetEntityById(m.TargetGridEntityId, out ent) || ent == null)
+                return null;
+            var g = ent as IMyCubeGrid;
+            if (g == null || g.Closed)
+                return null;
+            return g;
+        }
+
+        private static bool TryPickNextBlock(
+            MissionRuntime m,
+            IMyCubeGrid home,
+            CrewRecord crew,
+            Vector3D from,
+            out IMySlimBlock best,
+            out IMyCubeGrid bestGrid)
+        {
+            if (m != null && m.HasZone)
+                return TryPickBlockInZone(m, home, crew, from, out best, out bestGrid);
+
+            bestGrid = ResolveMissionTargetGrid(m);
+            return TryPickNearestBlock(bestGrid, from, out best, m) && best != null;
+        }
+
+        /// <summary>
+        /// Leaf-first pick among legal blocks whose world positions lie in the frozen zone.
+        /// </summary>
+        private static bool TryPickBlockInZone(
+            MissionRuntime m,
+            IMyCubeGrid home,
+            CrewRecord crew,
+            Vector3D from,
+            out IMySlimBlock best,
+            out IMyCubeGrid bestGrid)
+        {
+            best = null;
+            bestGrid = null;
+            if (m == null || !m.HasZone)
+                return false;
+
+            var zone = new BoundingBoxD(
+                new Vector3D(m.ZoneMinX, m.ZoneMinY, m.ZoneMinZ),
+                new Vector3D(m.ZoneMaxX, m.ZoneMaxY, m.ZoneMaxZ));
+
+            EntityScratch.Clear();
+            BoundingBoxD zoneCapture = zone;
+            try
+            {
+                MyAPIGateway.Entities.GetEntities(EntityScratch, e =>
+                {
+                    var g = e as IMyCubeGrid;
+                    if (g == null || g.Closed)
+                        return false;
+                    return zoneCapture.Intersects(g.WorldAABB);
+                });
+            }
+            catch { return false; }
+
+            int bestNeighbors = int.MaxValue;
+            double bestDistSq = double.MaxValue;
+
+            foreach (var ent in EntityScratch)
+            {
+                var grid = ent as IMyCubeGrid;
+                if (grid == null || grid.Closed)
+                    continue;
+                if (home != null)
+                {
+                    try
+                    {
+                        if (grid.EntityId == home.EntityId || grid.IsSameConstructAs(home))
+                            continue;
+                    }
+                    catch { continue; }
+                }
+                if (crew != null && !IsLegalTargetGrid(crew, grid))
+                    continue;
+
+                BlockScratch.Clear();
+                try { grid.GetBlocks(BlockScratch); }
+                catch { continue; }
+
+                for (int b = 0; b < BlockScratch.Count; b++)
+                {
+                    var slim = BlockScratch[b];
+                    if (slim == null || slim.IsDestroyed)
+                        continue;
+                    if (m.HasSkipCell && slim.Position == m.SkipCell && grid.EntityId == m.TargetGridEntityId)
+                        continue;
+
+                    Vector3D p = GetSlimWorld(slim, grid);
+                    if (!CrewSalvageRules.IsInsideZone(
+                            p.X, p.Y, p.Z,
+                            zone.Min.X, zone.Min.Y, zone.Min.Z,
+                            zone.Max.X, zone.Max.Y, zone.Max.Z))
+                        continue;
+
+                    double distSq = Vector3D.DistanceSquared(from, p);
+                    int neighbors = CountFaceNeighborBlocks(grid, slim);
+                    if (!CrewSalvageRules.PreferGrindCandidate(
+                            neighbors, distSq, bestNeighbors, bestDistSq))
+                        continue;
+                    bestNeighbors = neighbors;
+                    bestDistSq = distSq;
+                    best = slim;
+                    bestGrid = grid;
+                }
+            }
+
+            return best != null;
         }
 
         private static void ClearTarget(MissionRuntime m)
         {
             if (m == null) return;
             m.HasTargetCell = false;
+            m.HasApproachHover = false;
+            m.NoGrindProgressSeconds = 0;
         }
 
         private static bool TryResolveTarget(MissionRuntime m, IMyCubeGrid grid, out IMySlimBlock slim)
@@ -755,6 +1800,18 @@ namespace HireCrew
             return g.GridIntegerToWorld(slim.Position);
         }
 
+        /// <summary>Zone finished (no grindable blocks left) — clear mark/highlight, then go home.</summary>
+        private static void BeginReturnZoneDone(MissionRuntime m)
+        {
+            if (m != null)
+            {
+                var session = CrewSession.Instance;
+                if (session != null)
+                    session.ClearSalvageMarkForHome(m.HomeGridEntityId);
+            }
+            BeginReturn(m);
+        }
+
         private static void BeginReturn(MissionRuntime m)
         {
             if (m == null || string.IsNullOrEmpty(m.CrewId))
@@ -785,6 +1842,14 @@ namespace HireCrew
                             seat = seatEnt as IMyTerminalBlock;
                     }
                 }
+            }
+
+            // Dump any leftover grind comps before despawning the EVA body.
+            if (character != null && !character.Closed && home != null)
+            {
+                var buffer = GetCharacterInventory(character);
+                if (buffer != null)
+                    TransferInventoryToHome(buffer, home);
             }
 
             if (character != null && !character.Closed && seat != null && !seat.Closed)

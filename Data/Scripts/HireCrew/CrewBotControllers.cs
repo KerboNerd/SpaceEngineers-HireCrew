@@ -31,16 +31,16 @@ namespace HireCrew
         private static readonly List<IMyCharacter> DummiesToClose = new List<IMyCharacter>();
         private static readonly List<IMyPlayer> PlayerScratch = new List<IMyPlayer>();
 
-        // HireCrew_Crew = survival-enabled humanoid. Wildlife subtypes often still
-        // produce an IsBot EntityController even when humanoid SpawnBot returns 0.
+        // Prefer HireCrew_Harvest (AnimalBot + Astronaut AI): humanoids fail SpawnBot in
+        // deep space; vanilla SpaceSpider works but Spider.Teleport NREs after harvest.
+        // SpaceSpider is last-resort only and is closed immediately after controller steal.
         private static readonly string[] HarvestSubtypes =
         {
+            "HireCrew_Harvest",
             CrewConfig.AmbientBotSubtype,
-            "SpaceSpider",
-            "SpaceSpiderBlack",
-            "Wolf",
             "Female_Astronaut",
-            CrewConfig.AmbientBotSubtypeFallback
+            CrewConfig.AmbientBotSubtypeFallback,
+            "SpaceSpider"
         };
 
         private static Vector3D _harvestPos;
@@ -52,8 +52,9 @@ namespace HireCrew
 
         private const int TargetPoolSize = 4;
         private const int SpawnCooldownTicks = 90;
-        // Close far-away harvest dummies quickly; they must not linger in the sim.
-        private const int DummyCloseDelayTicks = 30;
+        // Close harvest dummies on the same tick as controller steal — leftover Spider AI
+        // Teleport crashes the session if the dummy body (or orphaned agent) lingers.
+        private const int DummyCloseDelayTicks = 0;
 
         public static int PoolCount
         {
@@ -234,8 +235,8 @@ namespace HireCrew
 
         private static void EnsureHarvestPosition()
         {
-            // Always deep space — never near the player. Harvest dummies (SpaceSpider) briefly
-            // show a disconnected-player icon; spawning overhead made that visible in-game.
+            // Always deep space — never near the player. Harvest dummies (animal body)
+            // briefly exist; spawning overhead made the icon visible in-game.
             _harvestPosVariant++;
             var rng = new Random(_harvestPosVariant * 9973 + 17);
             double r = 8000000 + rng.NextDouble() * 4000000;
@@ -312,9 +313,12 @@ namespace HireCrew
                     Controller = player.Controller
                 });
 
-                DummiesToClose.Add(player.Character);
+                var dummyBody = player.Character;
+                DummiesToClose.Add(dummyBody);
                 _closeDelayTicks = DummyCloseDelayTicks;
                 Log("harvested bot controller id=" + player.IdentityId + " pool=" + Pool.Count);
+                if (DummyCloseDelayTicks <= 0)
+                    CloseDummiesNow();
                 return;
             }
         }
@@ -329,6 +333,11 @@ namespace HireCrew
                 return;
             }
 
+            CloseDummiesNow();
+        }
+
+        private static void CloseDummiesNow()
+        {
             for (int i = 0; i < DummiesToClose.Count; i++)
             {
                 var bot = DummiesToClose[i];
@@ -340,6 +349,7 @@ namespace HireCrew
                 catch { }
             }
             DummiesToClose.Clear();
+            _closeDelayTicks = 0;
         }
 
         private static void Log(string msg)

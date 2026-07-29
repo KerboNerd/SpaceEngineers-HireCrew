@@ -44,5 +44,41 @@
         </SteeringBehavior>
       </SteeringBehaviors>
     </Bot>
+
+    <!--
+      Deep-space controller harvest dummy. Humanoid SpawnBot returns 0 off-planet;
+      AnimalBot still spawns. Uses Astronaut logic (not Spider) so MySpiderActions.Teleport
+      cannot NRE after the body is closed / controller reused on crew characters.
+    -->
+    <Bot xsi:type="MyObjectBuilder_AnimalBotDefinition">
+      <Id>
+        <TypeId>MyObjectBuilder_AnimalBot</TypeId>
+        <SubtypeId>HireCrew_Harvest</SubtypeId>
+      </Id>
+      <DisplayName>HireCrew Harvest</DisplayName>
+      <BotModel>Space_spider</BotModel>
+      <BotBehaviorTree Subtype="AstronautBehavior" />
+      <BehaviorType>Astronaut</BehaviorType>
+      <TargetType>Astronaut</TargetType>
+      <Public>true</Public>
+      <AvailableInSurvival>true</AvailableInSurvival>
+      <RemoveAfterDeath>true</RemoveAfterDeath>
+      <InventoryContentGenerated>false</InventoryContentGenerated>
+      <AttackLength>1000</AttackLength>
+      <AttackRadius>0.5</AttackRadius>
+      <CharacterDamage>0</CharacterDamage>
+      <GridDamage>0</GridDamage>
+      <TargetGrids>false</TargetGrids>
+      <TargetCharacters>false</TargetCharacters>
+      <CanOpenDoors>false</CanOpenDoors>
+      <DisableBroadcasting>true</DisableBroadcasting>
+      <Invulnerable>true</Invulnerable>
+      <IgnoredByAITargeting>true</IgnoredByAITargeting>
+      <SteeringBehaviors>
+        <SteeringBehavior xsi:type="MyObjectBuilder_BotCharacterAvoidanceSteering">
+          <Weight>0.06</Weight>
+        </SteeringBehavior>
+      </SteeringBehaviors>
+    </Bot>
   </Bots>
 </Definitions>

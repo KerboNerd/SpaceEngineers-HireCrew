@@ -229,21 +229,37 @@ namespace HireCrew
 
         // Salvage Ops EVA grind.
         public const float SalvageScanRadiusMeters = 2000f;
-        public const float SalvageGrindRangeMeters = 5f;
-        public const float SalvageEvaStandOffMeters = 4f;
+        /// <summary>Frozen mark AABB inflate so split debris still count.</summary>
+        public const float SalvageZonePadMeters = 15f;
+        /// <summary>Must stay larger than StandOff + Arrive or bots oscillate hover↔grind.</summary>
+        public const float SalvageGrindRangeMeters = 6.5f;
+        public const float SalvageEvaStandOffMeters = 2.75f;
         public const float SalvageEvaSpeedMeters = 9f;
         public const float SalvageEvaAccelMeters = 6f;
         public const float SalvageEvaTurnRate = 3.5f;
         public const float SalvageEvaArriveMeters = 1.5f;
         /// <summary>0 = unlimited parallel salvage sorties per home grid.</summary>
         public const int SalvageMaxParallelPerGrid = 0;
-        /// <summary>Base Keen grinder-seconds applied per real second at 0★.</summary>
-        public const float SalvageGrindMountPerSecondBase = 0.35f;
+        /// <summary>
+        /// Integrity points removed per real second at 0★ via DecreaseMountLevel
+        /// (that API takes integrity delta, not welder-seconds).
+        /// ~hand-grinder pace; 5★ ≈ 500/s.
+        /// </summary>
+        public const float SalvageGrindIntegrityPerSecondBase = 400f;
+
+        /// <summary>Never remove more than this fraction of MaxIntegrity per real second.</summary>
+        public const float SalvageGrindMaxIntegrityFractionPerSecond = 0.35f;
 
         /// <summary>0★ → 0.75× base, 5★ → 1.25× base.</summary>
+        public static float GetSalvageGrindIntegrityPerSecond(int stars)
+        {
+            return SalvageGrindIntegrityPerSecondBase * (0.75f + 0.1f * ClampStars(stars));
+        }
+
+        /// <summary>Obsolete name — use GetSalvageGrindIntegrityPerSecond.</summary>
         public static float GetSalvageGrindMountPerSecond(int stars)
         {
-            return SalvageGrindMountPerSecondBase * (0.75f + 0.1f * ClampStars(stars));
+            return GetSalvageGrindIntegrityPerSecond(stars);
         }
 
         /// <summary>0★ → 0.75× base, 5★ → 1.25× base.</summary>
