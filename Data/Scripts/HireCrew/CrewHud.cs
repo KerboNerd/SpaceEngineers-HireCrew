@@ -86,6 +86,18 @@ namespace HireCrew
 
         public void Unload()
         {
+            if (MyAPIGateway.Utilities != null && MyAPIGateway.Utilities.IsDedicated)
+            {
+                UnregisterChat();
+                _window = null;
+                _hireWindow = null;
+                _statusSidebar = null;
+                _rhfReady = false;
+                _model.Close();
+                _openHireBlockId = 0;
+                return;
+            }
+
             CrewAmbientNameplates.SetReady(false);
             CrewMissionMarkers.SetReady(false);
             CloseUi();

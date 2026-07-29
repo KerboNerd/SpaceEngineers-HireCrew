@@ -26,10 +26,6 @@ namespace HireCrew
 
         private static readonly Dictionary<string, Plate> ByCrewId = new Dictionary<string, Plate>();
         private static readonly List<string> ScratchRemove = new List<string>();
-        private static readonly GlyphFormat NameFormat = new GlyphFormat(
-            new Color(235, 240, 245),
-            TextAlignment.Center,
-            1.15f);
 
         private static bool _ready;
         private const float MaxDrawMeters = 20f;
@@ -154,7 +150,10 @@ namespace HireCrew
             var label = new Label(space)
             {
                 Text = name ?? "Crew",
-                Format = NameFormat,
+                Format = new GlyphFormat(
+                    new Color(235, 240, 245),
+                    TextAlignment.Center,
+                    1.15f),
                 AutoResize = true,
                 Visible = true,
                 ParentAlignment = ParentAlignments.Center,
