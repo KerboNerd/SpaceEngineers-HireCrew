@@ -49,6 +49,7 @@ namespace HireCrew
         private static int _closeDelayTicks;
         private static int _logThrottle;
         private static int _harvestPosVariant;
+        private static string _harvestAnchorKind = CrewHarvestSpawnRules.AnchorNone;
 
         private const int TargetPoolSize = 4;
         private const int SpawnCooldownTicks = 90;
@@ -70,6 +71,7 @@ namespace HireCrew
             _spawnCooldownTicks = 0;
             _closeDelayTicks = 0;
             _harvestPosVariant = 0;
+            _harvestAnchorKind = CrewHarvestSpawnRules.AnchorNone;
         }
 
         /// <summary>Call every server tick (~1 Hz is fine; more is better for harvest).</summary>
@@ -235,14 +237,84 @@ namespace HireCrew
 
         private static void EnsureHarvestPosition()
         {
-            // Always deep space — never near the player. Harvest dummies (animal body)
-            // briefly exist; spawning overhead made the icon visible in-game.
+            // Prefer a streamed sector near a loaded player/grid (2–5 km offset).
+            // Absolute deep space often returns SpawnBot id=0 on dedicated hosts.
             _harvestPosVariant++;
-            var rng = new Random(_harvestPosVariant * 9973 + 17);
-            double r = 8000000 + rng.NextDouble() * 4000000;
-            double ang = rng.NextDouble() * Math.PI * 2.0;
-            _harvestPos = new Vector3D(Math.Cos(ang) * r, (rng.NextDouble() - 0.5) * r * 0.2, Math.Sin(ang) * r);
+            Vector3D anchor;
+            if (TryGetPlayerAnchor(out anchor))
+            {
+                _harvestAnchorKind = CrewHarvestSpawnRules.AnchorPlayer;
+            }
+            else if (TryGetGridAnchor(out anchor))
+            {
+                _harvestAnchorKind = CrewHarvestSpawnRules.AnchorGrid;
+            }
+            else
+            {
+                _harvestAnchorKind = CrewHarvestSpawnRules.AnchorDeepSpace;
+                double x, y, z;
+                CrewHarvestSpawnRules.DeepSpaceFallback(_harvestPosVariant, out x, out y, out z);
+                _harvestPos = new Vector3D(x, y, z);
+                _harvestPosReady = true;
+                return;
+            }
+
+            double ox, oy, oz;
+            CrewHarvestSpawnRules.OffsetFromAnchor(
+                anchor.X, anchor.Y, anchor.Z, _harvestPosVariant, out ox, out oy, out oz);
+            _harvestPos = new Vector3D(ox, oy, oz);
             _harvestPosReady = true;
+        }
+
+        private static bool TryGetPlayerAnchor(out Vector3D pos)
+        {
+            pos = Vector3D.Zero;
+            PlayerScratch.Clear();
+            MyAPIGateway.Players.GetPlayers(PlayerScratch);
+            for (int i = 0; i < PlayerScratch.Count; i++)
+            {
+                var p = PlayerScratch[i];
+                if (p == null || p.IsBot)
+                    continue;
+                if (p.Character != null && !p.Character.Closed)
+                {
+                    pos = p.Character.GetPosition();
+                    return true;
+                }
+                if (p.Controller != null && p.Controller.ControlledEntity != null)
+                {
+                    var ent = p.Controller.ControlledEntity as IMyEntity;
+                    if (ent != null && !ent.Closed)
+                    {
+                        pos = ent.GetPosition();
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        private static bool TryGetGridAnchor(out Vector3D pos)
+        {
+            pos = Vector3D.Zero;
+            var session = CrewSession.Instance;
+            if (session == null || session.Store == null)
+                return false;
+
+            foreach (var crew in session.Store.All)
+            {
+                if (crew == null || crew.GridEntityId == 0)
+                    continue;
+                IMyEntity ent;
+                if (!MyAPIGateway.Entities.TryGetEntityById(crew.GridEntityId, out ent) || ent == null || ent.Closed)
+                    continue;
+                var grid = ent as IMyCubeGrid;
+                if (grid == null)
+                    continue;
+                pos = grid.WorldMatrix.Translation;
+                return true;
+            }
+            return false;
         }
 
         private static void TrySpawnHarvestDummy()
@@ -279,12 +351,19 @@ namespace HireCrew
                     continue;
 
                 PendingHarvestEntityIds.Add(bot.EntityId);
-                Log("harvest dummy spawned subtype=" + subtype + " id=" + bot.EntityId);
+                Log("harvest dummy spawned subtype=" + subtype + " id=" + bot.EntityId
+                    + " anchor=" + _harvestAnchorKind);
                 return;
             }
 
             if (++_logThrottle % 10 == 1)
-                Log("harvest SpawnBot failed for all subtypes (pool=" + Pool.Count + ")");
+            {
+                Log("harvest SpawnBot failed for all subtypes (pool=" + Pool.Count
+                    + " anchor=" + _harvestAnchorKind
+                    + " pos=" + _harvestPos.X.ToString("F0") + ","
+                    + _harvestPos.Y.ToString("F0") + ","
+                    + _harvestPos.Z.ToString("F0") + ")");
+            }
         }
 
         private static void TryHarvestPending()
