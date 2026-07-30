@@ -13,6 +13,7 @@ namespace HireCrew
     /// <summary>
     /// Client crew UI via Rich HUD Framework.
     /// /crew — toggle management UI (assign/dismiss)
+    /// Hotkey (default Home, remappable in Rich HUD) — same as /crew
     /// /crew hud — toggle construction status sidebar
     /// Cockpit terminal button / toolbar action — same
     /// /hirecrew (/hc) — admin commands (server-authoritative)
@@ -70,12 +71,14 @@ namespace HireCrew
                 _statusSidebar = new CrewStatusSidebar(HudMain.Root);
             CrewAmbientNameplates.SetReady(true);
             CrewMissionMarkers.SetReady(true);
+            CrewKeyBinds.Register();
         }
 
         private void OnHudReset()
         {
             CrewAmbientNameplates.SetReady(false);
             CrewMissionMarkers.SetReady(false);
+            CrewKeyBinds.Clear();
             _rhfReady = false;
             _window = null;
             _hireWindow = null;
@@ -105,6 +108,7 @@ namespace HireCrew
             UnregisterChat();
             if (_statusSidebar != null)
                 _statusSidebar.Apply(null, 0, false);
+            CrewKeyBinds.Clear();
             _window = null;
             _hireWindow = null;
             _statusSidebar = null;
@@ -134,6 +138,13 @@ namespace HireCrew
             }
 
             UpdateStatusSidebar();
+
+            var openBind = CrewKeyBinds.OpenCrewUi;
+            if (openBind != null
+                && CrewKeyBindRules.ShouldToggleOpenCrewUi(openBind.IsNewPressed, BindManager.IsChatOpen))
+            {
+                ToggleUi();
+            }
 
             if (!_model.IsOpen) return;
 

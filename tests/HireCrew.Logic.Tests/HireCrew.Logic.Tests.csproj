@@ -25,5 +25,6 @@
     <Compile Include="..\..\Data\Scripts\HireCrew\CrewMissionMarkerRules.cs" Link="CrewMissionMarkerRules.cs" />
     <Compile Include="..\..\Data\Scripts\HireCrew\CrewAdminFillRules.cs" Link="CrewAdminFillRules.cs" />
     <Compile Include="..\..\Data\Scripts\HireCrew\CrewHarvestSpawnRules.cs" Link="CrewHarvestSpawnRules.cs" />
+    <Compile Include="..\..\Data\Scripts\HireCrew\CrewKeyBindRules.cs" Link="CrewKeyBindRules.cs" />
   </ItemGroup>
 </Project>
