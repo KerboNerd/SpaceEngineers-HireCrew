@@ -661,6 +661,8 @@ namespace HireCrew
                 HandleRepairDispatch(CrewNetworking.Deserialize<RepairDispatchRequest>(data), identityId, sender);
             else if (id == CrewNetworking.SalvageDispatchMsg)
                 HandleSalvageDispatch(CrewNetworking.Deserialize<SalvageDispatchRequest>(data), identityId, sender);
+            else if (id == CrewNetworking.RoleDispatchBatchMsg)
+                HandleRoleDispatchBatch(CrewNetworking.Deserialize<RoleDispatchBatchRequest>(data), identityId, sender);
             else if (id == CrewNetworking.SalvageTargetEditMsg)
                 HandleSalvageTargetEdit(CrewNetworking.Deserialize<SalvageTargetEditRequest>(data), identityId, sender);
         }
@@ -751,6 +753,25 @@ namespace HireCrew
                 HandleSalvageDispatch(req, MyAPIGateway.Session.Player.IdentityId, MyAPIGateway.Multiplayer.MyId);
             else
                 CrewNetworking.SendToServer(CrewNetworking.SalvageDispatchMsg, data);
+        }
+
+        public void ClientRequestRoleDispatchBatch(long gridEntityId, CrewRole role, bool recall)
+        {
+            if (gridEntityId == 0)
+                return;
+            if (role != CrewRole.DamageControl && role != CrewRole.SalvageOps)
+                return;
+            var req = new RoleDispatchBatchRequest
+            {
+                GridEntityId = gridEntityId,
+                Role = (int)role,
+                Recall = recall
+            };
+            var data = CrewNetworking.Serialize(req);
+            if (MyAPIGateway.Multiplayer.IsServer)
+                HandleRoleDispatchBatch(req, MyAPIGateway.Session.Player.IdentityId, MyAPIGateway.Multiplayer.MyId);
+            else
+                CrewNetworking.SendToServer(CrewNetworking.RoleDispatchBatchMsg, data);
         }
 
         public void ClientRequestSalvageTargetEdit(long homeGridEntityId, long targetGridEntityId, bool clearAllManaged = false)
@@ -1145,6 +1166,91 @@ namespace HireCrew
             Notify(steamId, started
                 ? "Salvage: sent " + (crew.DisplayName ?? "salvager")
                 : "Salvage: nothing left in zone / not ready");
+        }
+
+        private void HandleRoleDispatchBatch(RoleDispatchBatchRequest req, long identityId, ulong steamId)
+        {
+            if (req == null || Store == null || req.GridEntityId == 0)
+                return;
+
+            var role = (CrewRole)req.Role;
+            if (role != CrewRole.DamageControl && role != CrewRole.SalvageOps)
+                return;
+
+            string label = role == CrewRole.SalvageOps ? "Salvage" : "Construction";
+
+            IMyCubeGrid grid;
+            if (!TryGetGrid(req.GridEntityId, out grid) || grid == null)
+            {
+                Notify(steamId, label + ": grid not found");
+                return;
+            }
+            if (!HasManagePermission(identityId, grid))
+            {
+                Notify(steamId, "No permission");
+                return;
+            }
+
+            if (req.Recall)
+            {
+                int recalled = 0;
+                foreach (var crew in Store.All)
+                {
+                    if (crew == null || crew.Role != role || crew.GridEntityId != req.GridEntityId)
+                        continue;
+                    bool ok = role == CrewRole.SalvageOps
+                        ? CrewSalvageMission.RecallCrew(crew.CrewId)
+                        : CrewRepairMission.RecallCrew(crew.CrewId);
+                    if (ok)
+                        recalled++;
+                }
+                Notify(steamId, CrewKeyBindRules.FormatRoleDispatchSummary(label, true, recalled));
+                return;
+            }
+
+            if (!CrewAmbientPresence.IsGridIdle(grid))
+            {
+                Notify(steamId, label + ": grid moving — wait");
+                return;
+            }
+
+            BoundingBoxD zone = default(BoundingBoxD);
+            long seedId = 0;
+            if (role == CrewRole.SalvageOps)
+            {
+                if (!ResolveSalvageZone(grid, out zone, out seedId))
+                {
+                    Notify(steamId, "Salvage: no target — /crew salvage then LMB a wreck");
+                    return;
+                }
+            }
+
+            int sent = 0;
+            foreach (var crew in Store.All)
+            {
+                if (crew == null || crew.Role != role || crew.GridEntityId != req.GridEntityId)
+                    continue;
+                if (crew.Status != CrewStatus.Seated)
+                    continue;
+
+                bool started;
+                if (role == CrewRole.SalvageOps)
+                {
+                    if (CrewSalvageMission.IsCrewOnMission(crew.CrewId))
+                        continue;
+                    started = CrewSalvageMission.DispatchCrew(this, crew.CrewId, zone, seedId);
+                }
+                else
+                {
+                    if (CrewRepairMission.IsCrewOnMission(crew.CrewId))
+                        continue;
+                    started = CrewRepairMission.DispatchCrew(this, crew.CrewId);
+                }
+                if (started)
+                    sent++;
+            }
+
+            Notify(steamId, CrewKeyBindRules.FormatRoleDispatchSummary(label, false, sent));
         }
 
         private void HandleRepairDispatch(RepairDispatchRequest req, long identityId, ulong steamId)

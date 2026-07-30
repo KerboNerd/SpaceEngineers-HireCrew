@@ -14,6 +14,7 @@ namespace HireCrew
     /// Client crew UI via Rich HUD Framework.
     /// /crew — toggle management UI (assign/dismiss)
     /// Hotkey (default Home, remappable in Rich HUD) — same as /crew
+    /// Hotkeys End / Delete — batch Send/Recall Construction / Salvage on seated grid
     /// /crew hud — toggle construction status sidebar
     /// Cockpit terminal button / toolbar action — same
     /// /hirecrew (/hc) — admin commands (server-authoritative)
@@ -141,9 +142,23 @@ namespace HireCrew
 
             var openBind = CrewKeyBinds.OpenCrewUi;
             if (openBind != null
-                && CrewKeyBindRules.ShouldToggleOpenCrewUi(openBind.IsNewPressed, BindManager.IsChatOpen))
+                && CrewKeyBindRules.ShouldHandleBind(openBind.IsNewPressed, BindManager.IsChatOpen))
             {
                 ToggleUi();
+            }
+
+            var constructionBind = CrewKeyBinds.SendRecallConstruction;
+            if (constructionBind != null
+                && CrewKeyBindRules.ShouldHandleBind(constructionBind.IsNewPressed, BindManager.IsChatOpen))
+            {
+                TryHotkeyRoleDispatch(CrewRole.DamageControl);
+            }
+
+            var salvageBind = CrewKeyBinds.SendRecallSalvage;
+            if (salvageBind != null
+                && CrewKeyBindRules.ShouldHandleBind(salvageBind.IsNewPressed, BindManager.IsChatOpen))
+            {
+                TryHotkeyRoleDispatch(CrewRole.SalvageOps);
             }
 
             if (!_model.IsOpen) return;
@@ -627,6 +642,42 @@ namespace HireCrew
         {
             if (grid == null) return "grid";
             return !string.IsNullOrEmpty(grid.CustomName) ? grid.CustomName : ("Grid " + grid.EntityId);
+        }
+
+        private void TryHotkeyRoleDispatch(CrewRole role)
+        {
+            var session = CrewSession.Instance;
+            if (session == null || session.Store == null)
+            {
+                Tell("HireCrew not ready");
+                return;
+            }
+
+            IMyCubeGrid grid;
+            string err;
+            if (!session.TryGetLocalManagedGrid(out grid, out err) || grid == null)
+            {
+                Tell(string.IsNullOrEmpty(err) ? "Sit in a seat to manage crew" : err);
+                return;
+            }
+
+            long gridId = grid.EntityId;
+            bool anyOnMission = false;
+            foreach (var crew in session.Store.All)
+            {
+                if (crew == null || crew.Role != role || crew.GridEntityId != gridId)
+                    continue;
+                if (role == CrewRole.SalvageOps
+                    ? session.IsCrewOnSalvageMission(crew.CrewId)
+                    : session.IsCrewOnRepairMission(crew.CrewId))
+                {
+                    anyOnMission = true;
+                    break;
+                }
+            }
+
+            bool recall = CrewKeyBindRules.ShouldRecallRole(anyOnMission);
+            session.ClientRequestRoleDispatchBatch(gridId, role, recall);
         }
 
         private static void Tell(string message)

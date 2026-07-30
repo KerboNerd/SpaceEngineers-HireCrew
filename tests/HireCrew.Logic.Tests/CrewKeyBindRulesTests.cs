@@ -21,5 +21,29 @@ namespace HireCrew.Logic.Tests
         {
             Assert.False(CrewKeyBindRules.ShouldToggleOpenCrewUi(false, false));
         }
+
+        [Fact]
+        public void ShouldHandleBind_matches_open_ui_gate()
+        {
+            Assert.True(CrewKeyBindRules.ShouldHandleBind(true, false));
+            Assert.False(CrewKeyBindRules.ShouldHandleBind(true, true));
+            Assert.False(CrewKeyBindRules.ShouldHandleBind(false, false));
+        }
+
+        [Fact]
+        public void ShouldRecallRole_when_any_on_mission()
+        {
+            Assert.True(CrewKeyBindRules.ShouldRecallRole(true));
+            Assert.False(CrewKeyBindRules.ShouldRecallRole(false));
+        }
+
+        [Fact]
+        public void FormatRoleDispatchSummary_sent_recall_none()
+        {
+            Assert.Equal("Construction: sent 3", CrewKeyBindRules.FormatRoleDispatchSummary("Construction", false, 3));
+            Assert.Equal("Salvage: recalling 2", CrewKeyBindRules.FormatRoleDispatchSummary("Salvage", true, 2));
+            Assert.Equal("Construction: none ready", CrewKeyBindRules.FormatRoleDispatchSummary("Construction", false, 0));
+            Assert.Equal("Salvage: none ready", CrewKeyBindRules.FormatRoleDispatchSummary("Salvage", true, 0));
+        }
     }
 }

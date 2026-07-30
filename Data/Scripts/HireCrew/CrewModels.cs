@@ -287,6 +287,16 @@ namespace HireCrew
         [ProtoMember(2)] public bool Recall;
     }
 
+    [ProtoContract]
+    public sealed class RoleDispatchBatchRequest
+    {
+        [ProtoMember(1)] public long GridEntityId;
+        /// <summary><see cref="CrewRole"/> as int. Only DamageControl and SalvageOps are valid.</summary>
+        [ProtoMember(2)] public int Role;
+        /// <summary>false = Send all idle eligible; true = Recall all on mission.</summary>
+        [ProtoMember(3)] public bool Recall;
+    }
+
     public enum SalvageMissionState
     {
         Idle = 0,
