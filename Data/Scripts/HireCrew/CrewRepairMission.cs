@@ -713,13 +713,13 @@ namespace HireCrew
                 UpdateStuckWatch(m, character, grid, GetSlimWorld(slim, grid), dt);
                 FlyToward(m, character, grid, flyTo, CrewConfig.GetRepairEvaSpeedMeters(crew.Stars), dt);
 
-                Vector3D blockPos = GetSlimWorld(slim, grid);
-                double weldR = CrewConfig.RepairWeldRangeMeters;
-                bool inWeldRange = Vector3D.DistanceSquared(character.GetPosition(), blockPos) <= weldR * weldR;
+                bool inWeldRange = IsInWeldRangeOfSlim(character.GetPosition(), slim, grid);
                 bool atHover = !m.HasStaging
                     && Vector3D.DistanceSquared(character.GetPosition(), hover)
                         <= CrewConfig.RepairEvaArriveMeters * CrewConfig.RepairEvaArriveMeters;
-                if (inWeldRange || atHover)
+                // Only enter Welding when in AABB weld range — atHover alone left large
+                // blocks "welding" while still outside the 5 m center sphere.
+                if (inWeldRange || (atHover && IsInWeldRangeOfSlim(hover, slim, grid)))
                 {
                     m.State = RepairMissionState.Welding;
                     m.StateSeconds = 0;
@@ -843,15 +843,23 @@ namespace HireCrew
             {
                 Vector3D pos = character.GetPosition();
                 Vector3D blockPos = GetSlimWorld(slim, grid);
-                double weldR = CrewConfig.RepairWeldRangeMeters;
-                double distSq = Vector3D.DistanceSquared(pos, blockPos);
+                bool inWeldRange = IsInWeldRangeOfSlim(pos, slim, grid);
 
-                // Hold outside and weld — do not dive into the block.
-                if (distSq > weldR * weldR)
+                // Hold outside the AABB and weld — do not dive into the block.
+                if (!inWeldRange)
                 {
                     StopWeldParticles(m.CrewId);
                     EnsureWeldApproach(m, grid, slim, pos);
                     Vector3D hover = GetHover(m);
+                    // Keep hover within weld reach of the AABB surface (not the center).
+                    if (!IsInWeldRangeOfSlim(hover, slim, grid))
+                    {
+                        hover = ComputeSlimSurfaceHover(
+                            slim, grid, pos, Math.Max(1.25f, CrewConfig.RepairEvaStandOffMeters * 0.65f));
+                        m.HoverX = hover.X;
+                        m.HoverY = hover.Y;
+                        m.HoverZ = hover.Z;
+                    }
                     UpdateStuckWatch(m, character, grid, blockPos, dt);
                     FlyToward(m, character, grid, hover, CrewConfig.GetRepairEvaSpeedMeters(crew.Stars) * 0.7f, dt);
                 }
@@ -866,8 +874,7 @@ namespace HireCrew
             if (character == null || character.Closed)
                 return;
             Vector3D weldAt = GetSlimWorld(slim, grid);
-            double weldRange = CrewConfig.RepairWeldRangeMeters;
-            if (Vector3D.DistanceSquared(character.GetPosition(), weldAt) > weldRange * weldRange)
+            if (!IsInWeldRangeOfSlim(character.GetPosition(), slim, grid))
             {
                 StopWeldParticles(m.CrewId);
                 return;
@@ -906,6 +913,11 @@ namespace HireCrew
             }
 
             float amount = CrewConfig.GetRepairWeldMountPerSecond(crew.Stars) * dt;
+            float maxIntegrity = 0f;
+            try { maxIntegrity = slim.MaxIntegrity; }
+            catch { }
+            if (CrewRepairShareRules.IsLargeBlock(maxIntegrity, CrewConfig.RepairShareMaxIntegrity))
+                amount *= CrewConfig.RepairLargeWeldMultiplier;
 
             float before = slim.Integrity;
             if (!TryWeldTick(slim, grid, welderId, amount))
@@ -953,10 +965,31 @@ namespace HireCrew
 
             bool missingComps = IsBlockedByMissingComponents(
                 slim, grid, m.TargetIsProjected || projectedPlaceFail);
+            // Stockpile still holding the next comps is not "out of components".
+            if (missingComps && !m.TargetIsProjected && !projectedPlaceFail
+                && StockpileHasAnyMissing(slim, MissingCompScratch))
+                missingComps = false;
 
-            // Permanent skip only for unweldable/ghost cells. Comp-blocked cells stay eligible
-            // once cargo is restocked (affordability is rechecked on each pick).
-            if (!missingComps && m.HasTargetCell)
+            float maxIntegrity = 0f;
+            try { if (slim != null) maxIntegrity = slim.MaxIntegrity; }
+            catch { }
+            bool large = !m.TargetIsProjected && !projectedPlaceFail
+                && CrewRepairShareRules.IsLargeBlock(
+                    maxIntegrity, CrewConfig.RepairShareMaxIntegrity);
+
+            // Large incomplete blocks: stay on target and re-feed. Abandoning mid-plate forced
+            // players to re-Send repeatedly to finish Epstein-class drives.
+            if (large && !missingComps && NeedsRepair(slim))
+            {
+                m.NoCompSeconds = 0;
+                m.HasHover = false;
+                FeedConstructionStockpile(slim, grid);
+                Log("repair large retry crew=" + m.CrewId);
+                return;
+            }
+
+            // Permanent skip only for unweldable/ghost cells. Never blacklist large blocks.
+            if (!missingComps && !large && m.HasTargetCell)
                 m.SkippedTargets.Add(SkipTargetKey(m.TargetCell, m.ProjectorEntityId, m.TargetIsProjected));
 
             Log(missingComps
@@ -1013,7 +1046,12 @@ namespace HireCrew
                 return false;
             // Large blocks list hundreds of plates as "missing" — require any stock to continue,
             // not the entire remaining recipe in cargo before the first spark.
-            return !HasAnyMissingComponentInCargo(grid, MissingCompScratch);
+            // Comps already on the block stockpile also count (shared welds / mid-feed).
+            if (HasAnyMissingComponentInCargo(grid, MissingCompScratch))
+                return false;
+            if (StockpileHasAnyMissing(slim, MissingCompScratch))
+                return false;
+            return true;
         }
 
         /// <summary>
@@ -1054,14 +1092,39 @@ namespace HireCrew
             }
         }
 
+        private static bool StockpileHasAnyMissing(IMySlimBlock slim, Dictionary<string, int> missing)
+        {
+            if (slim == null || missing == null || missing.Count == 0)
+                return false;
+            foreach (var kv in missing)
+            {
+                if (kv.Value <= 0 || string.IsNullOrEmpty(kv.Key))
+                    continue;
+                var id = new MyDefinitionId(typeof(MyObjectBuilder_Component), kv.Key);
+                try
+                {
+                    if (slim.GetConstructionStockpileItemAmount(id) > 0)
+                        return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
         private static void ClearCurrentTarget(MissionRuntime m, IMyCubeGrid grid = null)
         {
             if (m == null) return;
-            if (grid != null && !m.TargetIsProjected)
+            if (grid != null && !m.TargetIsProjected && m.HasTargetCell)
             {
-                IMySlimBlock abandon;
-                if (TryResolveTarget(m, grid, out abandon) && abandon != null)
-                    RefundBlockStockpile(abandon, grid);
+                // Shared welders still need the stockpile — only the last one to leave refunds.
+                int others = CountTargetClaimants(
+                    grid.EntityId, m.CrewId, m.TargetCell, m.ProjectorEntityId, false);
+                if (others == 0)
+                {
+                    IMySlimBlock abandon;
+                    if (TryResolveTarget(m, grid, out abandon) && abandon != null)
+                        RefundBlockStockpile(abandon, grid);
+                }
             }
             StopWeldParticles(m.CrewId);
             m.TargetBlockEntityId = 0;
@@ -1478,24 +1541,20 @@ namespace HireCrew
             {
                 Vector3D hover;
                 if (!TryComputeWeldHover(grid, slim, fromPos, out hover))
-                {
-                    Vector3D block = GetSlimWorld(slim, grid);
-                    Vector3D outward = block - grid.WorldAABB.Center;
-                    if (outward.LengthSquared() < 0.01)
-                        outward = grid.WorldMatrix.Forward;
-                    outward.Normalize();
-                    hover = block + outward * CrewConfig.RepairEvaStandOffMeters;
-                }
+                    hover = ComputeSlimSurfaceHover(slim, grid, fromPos, CrewConfig.RepairEvaStandOffMeters);
                 m.HoverX = hover.X;
                 m.HoverY = hover.Y;
                 m.HoverZ = hover.Z;
                 m.HasHover = true;
 
-                // Spread shared welders so bodies do not stack on one hover point.
+                // Spread shared welders along the surface (AABB-based), not around the center.
                 int shareSlot = 0;
                 if (!string.IsNullOrEmpty(m.CrewId))
                     shareSlot = Math.Abs(m.CrewId.GetHashCode()) % 7;
+                BoundingBoxD slimBox;
                 Vector3D hoverBlock = GetSlimWorld(slim, grid);
+                if (TryGetSlimWorldBox(slim, grid, out slimBox))
+                    hoverBlock = slimBox.Center;
                 Vector3D hoverOut = new Vector3D(m.HoverX, m.HoverY, m.HoverZ) - hoverBlock;
                 if (hoverOut.LengthSquared() < 0.01)
                     hoverOut = grid.WorldMatrix.Forward;
@@ -1508,6 +1567,17 @@ namespace HireCrew
                 m.HoverX += off.X;
                 m.HoverY += off.Y;
                 m.HoverZ += off.Z;
+                // Re-snap to a valid surface hover if the offset left weld reach.
+                hover = new Vector3D(m.HoverX, m.HoverY, m.HoverZ);
+                if (!IsInWeldRangeOfSlim(hover, slim, grid))
+                {
+                    hover = ComputeSlimSurfaceHover(
+                        slim, grid, fromPos, Math.Max(1.25f, CrewConfig.RepairEvaStandOffMeters * 0.65f));
+                    hover = hover + hoverSide * lateral;
+                    m.HoverX = hover.X;
+                    m.HoverY = hover.Y;
+                    m.HoverZ = hover.Z;
+                }
                 hover = new Vector3D(m.HoverX, m.HoverY, m.HoverZ);
 
                 // If the straight path is blocked by the hull, stage outside the AABB first.
@@ -1534,67 +1604,29 @@ namespace HireCrew
             if (grid == null || slim == null)
                 return false;
 
-            Vector3D block = GetSlimWorld(slim, grid);
-            float stand = CrewConfig.RepairEvaStandOffMeters;
-            MatrixD wm = grid.WorldMatrix;
-            Vector3D center = grid.WorldAABB.Center;
-
-            Vector3D[] dirs =
+            // AABB surface hover — center + stand-off buries bots inside large fat blocks.
+            hover = ComputeSlimSurfaceHover(slim, grid, preferFrom, CrewConfig.RepairEvaStandOffMeters);
+            try
             {
-                wm.Right, -wm.Right, wm.Up, -wm.Up, wm.Forward, -wm.Backward,
-                block - center,
-                preferFrom - block
-            };
-
-            double bestScore = double.MinValue;
-            bool any = false;
-            for (int i = 0; i < dirs.Length; i++)
-            {
-                Vector3D dir = dirs[i];
-                if (dir.LengthSquared() < 0.0001)
-                    continue;
-                dir.Normalize();
-                Vector3D candidate = block + dir * stand;
-
-                // Prefer empty cells (not inside armor).
-                try
+                Vector3I cell = grid.WorldToGridInteger(hover);
+                if (grid.CubeExists(cell) || grid.GetCubeBlock(cell) != null)
                 {
-                    Vector3I cell = grid.WorldToGridInteger(candidate);
-                    if (grid.CubeExists(cell) || grid.GetCubeBlock(cell) != null)
-                        continue;
-                }
-                catch { continue; }
-
-                // Clear air between hover and block face.
-                IHitInfo hit;
-                bool blocked = MyAPIGateway.Physics.CastRay(candidate, block, out hit)
-                    && hit != null
-                    && hit.HitEntity != null
-                    && Vector3D.Distance(candidate, hit.Position) < stand * 0.45;
-                if (blocked)
-                    continue;
-
-                // Prefer exterior hull faces (farther from grid center). Only weakly prefer
-                // proximity to the bot — strong towardBot bias picks the near/wrong side
-                // when starting inside, which looks like flying away from the damage.
-                Vector3D fromBlock = block - center;
-                double exteriorAlign = 0;
-                if (fromBlock.LengthSquared() > 0.01)
-                {
-                    fromBlock.Normalize();
-                    exteriorAlign = Vector3D.Dot(dir, fromBlock) * 40.0;
-                }
-                double towardBot = -Vector3D.DistanceSquared(candidate, preferFrom) * 0.25;
-                double hullBias = Vector3D.DistanceSquared(candidate, center) * 0.2;
-                double score = towardBot + hullBias + exteriorAlign;
-                if (!any || score > bestScore)
-                {
-                    bestScore = score;
-                    hover = candidate;
-                    any = true;
+                    BoundingBoxD box;
+                    if (TryGetSlimWorldBox(slim, grid, out box))
+                    {
+                        Vector3D dir = hover - box.Center;
+                        if (dir.LengthSquared() < 0.01)
+                            dir = preferFrom - box.Center;
+                        if (dir.LengthSquared() < 0.01)
+                            dir = grid.WorldMatrix.Forward;
+                        dir.Normalize();
+                        hover = hover + dir * 1.5;
+                    }
                 }
             }
-            return any;
+            catch { }
+
+            return true;
         }
 
         private static bool NeedsExteriorStaging(
@@ -1833,6 +1865,26 @@ namespace HireCrew
             if (m.UnstuckCount > 6)
             {
                 m.UnstuckCount = 0;
+                // Do not abort a large incomplete weld — hover thrash was ending sorties early.
+                if (m.State == RepairMissionState.Welding
+                    && m.HasTargetCell
+                    && !m.TargetIsProjected)
+                {
+                    IMySlimBlock stuckSlim;
+                    if (TryResolveTarget(m, grid, out stuckSlim) && stuckSlim != null && NeedsRepair(stuckSlim))
+                    {
+                        float mi = 0f;
+                        try { mi = stuckSlim.MaxIntegrity; }
+                        catch { }
+                        if (CrewRepairShareRules.IsLargeBlock(mi, CrewConfig.RepairShareMaxIntegrity))
+                        {
+                            m.HasHover = false;
+                            m.HasStaging = false;
+                            Log("repair unstuck keep large crew=" + m.CrewId);
+                            return;
+                        }
+                    }
+                }
                 BeginReturn(m);
             }
         }
@@ -2947,6 +2999,102 @@ namespace HireCrew
             return g.GridIntegerToWorld(slim.Position);
         }
 
+        /// <summary>
+        /// World AABB of the slim (block cubes when available). Large thrusters dwarf a
+        /// center-point + 5 m sphere — range/hover must use the real bounds.
+        /// </summary>
+        private static bool TryGetSlimWorldBox(IMySlimBlock slim, IMyCubeGrid grid, out BoundingBoxD box)
+        {
+            box = default(BoundingBoxD);
+            if (slim == null)
+                return false;
+            try
+            {
+                slim.GetWorldBoundingBox(out box, true);
+                if (box.Max.X >= box.Min.X && box.Max.Y >= box.Min.Y && box.Max.Z >= box.Min.Z)
+                    return true;
+            }
+            catch { }
+            try
+            {
+                if (slim.FatBlock != null)
+                {
+                    box = slim.FatBlock.WorldAABB;
+                    return true;
+                }
+            }
+            catch { }
+
+            Vector3D c = GetSlimWorld(slim, grid);
+            double half = 1.25;
+            try
+            {
+                if (grid != null && grid.GridSizeEnum == MyCubeSize.Small)
+                    half = 0.25;
+            }
+            catch { }
+            box = new BoundingBoxD(c - new Vector3D(half), c + new Vector3D(half));
+            return true;
+        }
+
+        private static bool IsInWeldRangeOfSlim(Vector3D pos, IMySlimBlock slim, IMyCubeGrid grid)
+        {
+            BoundingBoxD box;
+            if (!TryGetSlimWorldBox(slim, grid, out box))
+                return false;
+            // Inside the fat volume → clipping/glitching; force a surface hover instead.
+            try
+            {
+                if (box.Contains(pos) != ContainmentType.Disjoint)
+                    return false;
+            }
+            catch { }
+            return CrewRepairShareRules.IsWithinDistanceOfAabb(
+                pos.X, pos.Y, pos.Z,
+                box.Min.X, box.Min.Y, box.Min.Z,
+                box.Max.X, box.Max.Y, box.Max.Z,
+                CrewConfig.RepairWeldRangeMeters);
+        }
+
+        /// <summary>Hover just outside the block AABB facing the approach direction.</summary>
+        private static Vector3D ComputeSlimSurfaceHover(
+            IMySlimBlock slim,
+            IMyCubeGrid grid,
+            Vector3D fromPos,
+            float standOff)
+        {
+            BoundingBoxD box;
+            if (!TryGetSlimWorldBox(slim, grid, out box))
+            {
+                Vector3D c = GetSlimWorld(slim, grid);
+                Vector3D o = fromPos - c;
+                if (o.LengthSquared() < 0.01)
+                    o = grid != null ? grid.WorldMatrix.Forward : Vector3D.Forward;
+                o.Normalize();
+                return c + o * standOff;
+            }
+
+            Vector3D center = box.Center;
+            Vector3D dir = fromPos - center;
+            if (dir.LengthSquared() < 0.01)
+                dir = grid != null ? (center - grid.WorldAABB.Center) : Vector3D.Forward;
+            if (dir.LengthSquared() < 0.01)
+                dir = grid != null ? grid.WorldMatrix.Forward : Vector3D.Forward;
+            dir.Normalize();
+
+            // Ray from center through approach dir → AABB surface, then stand off.
+            Vector3D halfExt = (box.Max - box.Min) * 0.5;
+            Vector3D far = center + dir * (halfExt.Length() * 2.0 + standOff + 2.0);
+            Vector3D surface;
+            if (!TryAabbExitToward(box, center, far, out surface))
+                surface = ClosestPointOnAabbSurface(box, fromPos);
+            Vector3D outward = AabbFaceOutwardNormal(box, surface);
+            if (Vector3D.Dot(outward, dir) < 0.2)
+                outward = dir;
+            outward.Normalize();
+            return surface + outward * standOff;
+        }
+
         private static bool TryWeldTick(IMySlimBlock slim, IMyCubeGrid grid, long welderOwnerId, float weldSeconds)
         {
             if (slim == null || grid == null || weldSeconds <= 0f)
@@ -3002,23 +3150,26 @@ namespace HireCrew
             IMyInventory weldInv = null;
             if (needsComps && !creative)
             {
-                // Do not abort when cargo looks empty — a prior feed may still hold plates on
-                // the block stockpile. Early return here left blocks stuck around 99%.
-                if (HasAnyMissingComponentInCargo(grid, MissingCompScratch))
-                {
-                    // Resolve output inv before feed — MoveItemsToConstructionStockpile empties cargo.
-                    weldInv = FindInventoryWithMissingComps(grid, MissingCompScratch);
+                bool cargoHas = HasAnyMissingComponentInCargo(grid, MissingCompScratch);
+                if (cargoHas)
                     FeedConstructionStockpile(slim, grid);
-                }
-                else
-                    weldInv = FindAnyGridInventory(grid);
+
+                bool stockHas = StockpileHasAnyMissing(slim, MissingCompScratch);
+                // Do not abort when cargo looks empty — plates may already sit on the stockpile.
+                if (!cargoHas && !stockHas)
+                    return false;
+
+                // Keen's "outputInventory" arg is also a component SOURCE. After Feed empties
+                // cargo into the stockpile, passing that emptied inv stalls late plate stages
+                // on large blocks. Prefer null so mounts come from the construction stockpile;
+                // only pass an inv that still holds missing comps (other containers).
+                weldInv = FindInventoryWithMissingComps(grid, MissingCompScratch);
             }
 
             bool progressed = deformProgressed;
             try
             {
                 // weldSeconds is Keen "welder seconds" (multiplied by IntegrityPointsPerSec internally).
-                // outputInventory receives surplus on complete; stockpile (fed above) supplies mounts.
                 slim.IncreaseMountLevel(
                     weldSeconds,
                     welderOwnerId,
@@ -3073,19 +3224,7 @@ namespace HireCrew
                     catch { }
                 }
             }
-            return InvScratch.Count > 0 ? InvScratch[0] : null;
-        }
-
-        private static IMyInventory FindAnyGridInventory(IMyCubeGrid grid)
-        {
-            if (grid == null)
-                return null;
-            CollectGridInventories(grid, InvScratch);
-            for (int i = 0; i < InvScratch.Count; i++)
-            {
-                if (InvScratch[i] != null)
-                    return InvScratch[i];
-            }
+            // null = mount from construction stockpile only (do not pass an emptied cargo inv).
             return null;
         }
 

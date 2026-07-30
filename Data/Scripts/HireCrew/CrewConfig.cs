@@ -297,6 +297,8 @@ namespace HireCrew
         public const float RepairShareMaxIntegrity = 5000f;
         /// <summary>Max concurrent welders on one large block when other work still exists.</summary>
         public const int RepairShareMaxWelders = 3;
+        /// <summary>Extra IncreaseMountLevel scale on large blocks so one sortie can finish them.</summary>
+        public const float RepairLargeWeldMultiplier = 4f;
 
         public static int ClampStars(int stars)
         {
