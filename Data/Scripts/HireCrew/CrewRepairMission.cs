@@ -69,6 +69,8 @@ namespace HireCrew
             public double FwdX;
             public double FwdY;
             public double FwdZ;
+            /// <summary>Cells skipped this sortie after a stuck weld (ghost / unweldable).</summary>
+            public readonly HashSet<string> SkippedTargets = new HashSet<string>();
         }
 
         /// <summary>Active missions keyed by crew id (parallel EVAs on one grid allowed).</summary>
@@ -82,12 +84,6 @@ namespace HireCrew
         private static readonly Dictionary<string, MyParticleEffect> WeldFxByCrew =
             new Dictionary<string, MyParticleEffect>();
         private static readonly Dictionary<string, int> MissingCompScratch =
-            new Dictionary<string, int>();
-        private static readonly Dictionary<string, int> MissingBeforeScratch =
-            new Dictionary<string, int>();
-        private static readonly Dictionary<string, int> MissingAfterScratch =
-            new Dictionary<string, int>();
-        private static readonly Dictionary<string, int> CargoBeforeScratch =
             new Dictionary<string, int>();
         private static readonly List<IMyInventory> InvScratch = new List<IMyInventory>(64);
         private static readonly List<IMyCubeGrid> GridGroupScratch = new List<IMyCubeGrid>(8);
@@ -514,7 +510,14 @@ namespace HireCrew
                     float amount = CrewConfig.GetRepairWeldMountPerSecond(crew.Stars) * (float)dt;
                     if (!TryWeldTick(slim, grid, welderId, amount))
                     {
-                        BeginReturn(m);
+                        // Same as EVA: one failed cell must not end the sortie.
+                        bool missing = IsBlockedByMissingComponents(slim, grid, false);
+                        if (!missing && m.HasTargetCell)
+                            m.SkippedTargets.Add(
+                                SkipTargetKey(m.TargetCell, m.ProjectorEntityId, m.TargetIsProjected));
+                        ClearCurrentTarget(m, grid);
+                        if (!TryAcquireNextTarget(m, grid, grid.WorldAABB.Center, 0f) && missing)
+                            TryFinishIfOnlyUnaffordableWork(session, m, crew, grid);
                         continue;
                     }
                     if (!NeedsRepair(slim))
@@ -673,6 +676,9 @@ namespace HireCrew
             IMySlimBlock slim;
             if (!TryResolveTarget(m, grid, out slim) || slim == null)
             {
+                // Release stale claims (grinded block / projector cell) before rescanning.
+                if (m.HasTargetCell)
+                    ClearCurrentTarget(m, grid);
                 TryAcquireNextTarget(m, grid, fromPos, dt);
                 if (!TryResolveTarget(m, grid, out slim) || slim == null)
                 {
@@ -804,11 +810,26 @@ namespace HireCrew
             if (!TryResolveTarget(m, grid, out slim) || slim == null
                 || (!m.TargetIsProjected && !NeedsRepair(slim)))
             {
-                Vector3D from = character != null ? character.GetPosition() : grid.WorldAABB.Center;
-                if (!TryAcquireNextTarget(m, grid, from, dt))
+                // Drop ghost claims (missing cell / CanBuild no longer OK) so we do not
+                // idle in Welding forever while AcquireCooldown suppresses rescans.
+                Vector3D from = character != null && !character.Closed
+                    ? character.GetPosition()
+                    : grid.WorldAABB.Center;
+                ClearCurrentTarget(m, grid);
+                if (!TryAcquireNextTarget(m, grid, from, dt)
+                    || !TryResolveTarget(m, grid, out slim)
+                    || slim == null)
+                {
+                    if (!m.HasTargetCell)
+                    {
+                        m.State = RepairMissionState.EvaTransit;
+                        m.StateSeconds = 0;
+                    }
                     return;
-                if (!TryResolveTarget(m, grid, out slim) || slim == null)
-                    return;
+                }
+                m.State = RepairMissionState.EvaTransit;
+                m.StateSeconds = 0;
+                return;
             }
             else
                 m.NoWorkSeconds = 0;
@@ -865,13 +886,7 @@ namespace HireCrew
                     || !TryBuildProjected(projector, slim, grid, welderId, out placed)
                     || placed == null)
                 {
-                    m.NoCompSeconds += dt;
-                    if (m.NoCompSeconds >= CrewConfig.RepairNoCompAbortSeconds)
-                    {
-                        NotifyOutOfComponents(session, m, crew);
-                        Log("repair project fail crew=" + m.CrewId);
-                        BeginReturn(m);
-                    }
+                    HandleWeldStall(session, m, crew, grid, character, slim, dt, projectedPlaceFail: true);
                     return;
                 }
 
@@ -895,13 +910,7 @@ namespace HireCrew
             float before = slim.Integrity;
             if (!TryWeldTick(slim, grid, welderId, amount))
             {
-                m.NoCompSeconds += dt;
-                if (m.NoCompSeconds >= CrewConfig.RepairNoCompAbortSeconds)
-                {
-                    NotifyOutOfComponents(session, m, crew);
-                    Log("repair out of comps crew=" + m.CrewId);
-                    BeginReturn(m);
-                }
+                HandleWeldStall(session, m, crew, grid, character, slim, dt, projectedPlaceFail: false);
                 return;
             }
 
@@ -915,6 +924,133 @@ namespace HireCrew
                 m.State = RepairMissionState.EvaTransit;
                 m.StateSeconds = 0;
                 TryAcquireNextTarget(m, grid, character.GetPosition(), 0f);
+            }
+        }
+
+        /// <summary>
+        /// Skip the current cell after a stall. Missing comps for one block must not end the
+        /// sortie — other affordable work may remain. Home only via TryAcquireNextTarget.
+        /// </summary>
+        private static void HandleWeldStall(
+            CrewSession session,
+            MissionRuntime m,
+            CrewRecord crew,
+            IMyCubeGrid grid,
+            IMyCharacter character,
+            IMySlimBlock slim,
+            float dt,
+            bool projectedPlaceFail)
+        {
+            if (m == null)
+                return;
+
+            m.NoCompSeconds += dt;
+            float limit = projectedPlaceFail
+                ? CrewConfig.RepairNoCompAbortSeconds
+                : CrewConfig.RepairNoProgressSkipSeconds;
+            if (m.NoCompSeconds < limit)
+                return;
+
+            bool missingComps = IsBlockedByMissingComponents(
+                slim, grid, m.TargetIsProjected || projectedPlaceFail);
+
+            // Permanent skip only for unweldable/ghost cells. Comp-blocked cells stay eligible
+            // once cargo is restocked (affordability is rechecked on each pick).
+            if (!missingComps && m.HasTargetCell)
+                m.SkippedTargets.Add(SkipTargetKey(m.TargetCell, m.ProjectorEntityId, m.TargetIsProjected));
+
+            Log(missingComps
+                ? ("repair skip unaffordable crew=" + m.CrewId)
+                : ("repair skip stuck target crew=" + m.CrewId
+                    + (m.HasTargetCell ? (" cell=" + m.TargetCell) : string.Empty)));
+
+            ClearCurrentTarget(m, grid);
+            m.NoCompSeconds = 0;
+            m.State = RepairMissionState.EvaTransit;
+            m.StateSeconds = 0;
+            Vector3D from = character != null && !character.Closed
+                ? character.GetPosition()
+                : grid.WorldAABB.Center;
+            if (!TryAcquireNextTarget(m, grid, from, 0f) && missingComps)
+            {
+                // No other pickable work right now — if cache is only unaffordable, go home.
+                if (TryFinishIfOnlyUnaffordableWork(session, m, crew, grid))
+                    return;
+            }
+        }
+
+        private static string SkipTargetKey(Vector3I cell, long projectorEntityId, bool projected)
+        {
+            return (projected ? "p" : "r") + ":" + projectorEntityId + ":" + cell.X + "," + cell.Y + "," + cell.Z;
+        }
+
+        private static bool IsBlockedByMissingComponents(
+            IMySlimBlock slim,
+            IMyCubeGrid grid,
+            bool projectedFirstComp)
+        {
+            if (slim == null || grid == null)
+                return false;
+
+            bool creative = false;
+            try { creative = MyAPIGateway.Session != null && MyAPIGateway.Session.CreativeMode; }
+            catch { }
+            if (creative)
+                return false;
+
+            if (projectedFirstComp)
+            {
+                MyDefinitionId firstCompId;
+                if (!TryGetFirstComponentId(slim, out firstCompId))
+                    return false;
+                return CountComponentOnGrid(grid, firstCompId) < 1;
+            }
+
+            MissingCompScratch.Clear();
+            try { slim.GetMissingComponents(MissingCompScratch); }
+            catch { return false; }
+            if (MissingCompScratch.Count == 0)
+                return false;
+            // Large blocks list hundreds of plates as "missing" — require any stock to continue,
+            // not the entire remaining recipe in cargo before the first spark.
+            return !HasAnyMissingComponentInCargo(grid, MissingCompScratch);
+        }
+
+        /// <summary>
+        /// True when cargo has at least one unit of any still-missing component type.
+        /// </summary>
+        private static bool HasAnyMissingComponentInCargo(
+            IMyCubeGrid grid,
+            Dictionary<string, int> missing)
+        {
+            if (grid == null || missing == null || missing.Count == 0)
+                return false;
+            foreach (var kv in missing)
+            {
+                if (kv.Value <= 0 || string.IsNullOrEmpty(kv.Key))
+                    continue;
+                var id = new MyDefinitionId(typeof(MyObjectBuilder_Component), kv.Key);
+                if (CountComponentOnGrid(grid, id) > 0)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Pull missing comps into the block stockpile (Keen mounts from stockpile, including plates).
+        /// </summary>
+        private static void FeedConstructionStockpile(IMySlimBlock slim, IMyCubeGrid grid)
+        {
+            if (slim == null || grid == null)
+                return;
+            CollectGridInventories(grid, InvScratch);
+            for (int i = 0; i < InvScratch.Count; i++)
+            {
+                var inv = InvScratch[i];
+                if (inv == null)
+                    continue;
+                try { slim.MoveItemsToConstructionStockpile(inv); }
+                catch { }
             }
         }
 
@@ -981,14 +1117,144 @@ namespace HireCrew
                 return false;
             }
 
-            m.NoWorkSeconds += Math.Max(dt, CrewConfig.RepairAcquireThrottleSeconds);
-            if (m.NoWorkSeconds >= CrewConfig.RepairNoWorkReturnSeconds)
+            // Fresh cache before deciding the sortie is done (ClearTarget invalidates often).
+            InvalidateWorkCache();
+            EnsureWorkCache(grid);
+
+            bool projectorPending = HasPendingProjectorHolograms(grid);
+            float returnAfter = projectorPending
+                ? CrewConfig.RepairProjectorIdleReturnSeconds
+                : CrewConfig.RepairNoWorkReturnSeconds;
+
+            // Unclaimed cache entries we cannot pick = unaffordable or locally skipped.
+            // Keep waiting for projector frontier; otherwise OOC-home if cargo is the blocker.
+            if (WorkCache.Count > 0 && !projectorPending)
             {
-                Log("repair no work crew=" + m.CrewId);
+                var session = CrewSession.Instance;
+                var crew = session != null && session.Store != null
+                    ? session.Store.Get(m.CrewId)
+                    : null;
+                if (TryFinishIfOnlyUnaffordableWork(session, m, crew, grid))
+                    return false;
+            }
+
+            m.NoWorkSeconds += Math.Max(dt, CrewConfig.RepairAcquireThrottleSeconds);
+            if (m.NoWorkSeconds >= returnAfter)
+            {
+                Log("repair no work crew=" + m.CrewId
+                    + (projectorPending ? " (projector idle)" : string.Empty));
                 BeginReturn(m);
                 return false;
             }
             return false;
+        }
+
+        /// <summary>
+        /// True when a projector still has hologram blocks (even if none are CanBuild yet).
+        /// </summary>
+        private static bool HasPendingProjectorHolograms(IMyCubeGrid grid)
+        {
+            if (grid == null)
+                return false;
+
+            BlockScratch.Clear();
+            grid.GetBlocks(BlockScratch);
+            for (int i = 0; i < BlockScratch.Count; i++)
+            {
+                var fat = BlockScratch[i] != null ? BlockScratch[i].FatBlock : null;
+                var proj = fat as IMyProjector;
+                if (proj == null || proj.Closed || !proj.IsWorking || !proj.IsProjecting)
+                    continue;
+                IMyCubeGrid pGrid = proj.ProjectedGrid;
+                if (pGrid == null)
+                    continue;
+                ProjectedScratch.Clear();
+                pGrid.GetBlocks(ProjectedScratch);
+                if (ProjectedScratch.Count > 0)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// If every unclaimed cache entry fails affordability, notify and go home.
+        /// Returns true when the mission was ended.
+        /// </summary>
+        private static bool TryFinishIfOnlyUnaffordableWork(
+            CrewSession session,
+            MissionRuntime m,
+            CrewRecord crew,
+            IMyCubeGrid grid)
+        {
+            if (m == null || grid == null)
+                return false;
+
+            EnsureWorkCache(grid);
+            bool sawUnaffordable = false;
+            bool sawOther = false;
+
+            for (int i = 0; i < WorkCache.Count; i++)
+            {
+                CachedWork w = WorkCache[i];
+                if (m.SkippedTargets.Contains(SkipTargetKey(w.Cell, w.ProjectorEntityId, w.Projected)))
+                {
+                    sawOther = true;
+                    continue;
+                }
+
+                IMySlimBlock slim;
+                if (!TryResolveCachedWork(grid, w, out slim) || slim == null)
+                    continue;
+
+                if (IsTargetClaimFull(grid, m.CrewId, w, slim))
+                    continue;
+
+                if (!CanAffordSlimWork(grid, slim, w.Projected))
+                {
+                    sawUnaffordable = true;
+                    continue;
+                }
+
+                // Affordable work with a free claim slot exists — stay out.
+                return false;
+            }
+
+            if (!sawUnaffordable || sawOther)
+                return false;
+
+            NotifyOutOfComponents(session, m, crew);
+            Log("repair out of comps crew=" + m.CrewId);
+            BeginReturn(m);
+            return true;
+        }
+
+        private static bool TryResolveCachedWork(
+            IMyCubeGrid grid,
+            CachedWork w,
+            out IMySlimBlock slim)
+        {
+            slim = null;
+            if (grid == null)
+                return false;
+            if (!w.Projected)
+            {
+                slim = grid.GetCubeBlock(w.Cell);
+                return slim != null;
+            }
+
+            IMyEntity pent;
+            if (!MyAPIGateway.Entities.TryGetEntityById(w.ProjectorEntityId, out pent) || pent == null)
+                return false;
+            var projector = pent as IMyProjector;
+            if (projector == null || projector.ProjectedGrid == null)
+                return false;
+            slim = projector.ProjectedGrid.GetCubeBlock(w.Cell);
+            return slim != null;
+        }
+
+        private static bool CanAffordSlimWork(IMyCubeGrid grid, IMySlimBlock slim, bool projected)
+        {
+            return !IsBlockedByMissingComponents(slim, grid, projected);
         }
 
         private static bool SiblingHasClaimedTarget(long gridId, string selfCrewId)
@@ -1224,6 +1490,25 @@ namespace HireCrew
                 m.HoverY = hover.Y;
                 m.HoverZ = hover.Z;
                 m.HasHover = true;
+
+                // Spread shared welders so bodies do not stack on one hover point.
+                int shareSlot = 0;
+                if (!string.IsNullOrEmpty(m.CrewId))
+                    shareSlot = Math.Abs(m.CrewId.GetHashCode()) % 7;
+                Vector3D hoverBlock = GetSlimWorld(slim, grid);
+                Vector3D hoverOut = new Vector3D(m.HoverX, m.HoverY, m.HoverZ) - hoverBlock;
+                if (hoverOut.LengthSquared() < 0.01)
+                    hoverOut = grid.WorldMatrix.Forward;
+                hoverOut.Normalize();
+                Vector3D hoverSide = Vector3D.CalculatePerpendicularVector(hoverOut);
+                double lateral;
+                double outwardBias;
+                CrewRepairShareRules.SharedHoverOffsets(shareSlot, out lateral, out outwardBias);
+                Vector3D off = hoverSide * lateral + hoverOut * outwardBias;
+                m.HoverX += off.X;
+                m.HoverY += off.Y;
+                m.HoverZ += off.Z;
+                hover = new Vector3D(m.HoverX, m.HoverY, m.HoverZ);
 
                 // If the straight path is blocked by the hull, stage outside the AABB first.
                 Vector3D stage;
@@ -2005,17 +2290,8 @@ namespace HireCrew
                     var s = ProjectedScratch[j];
                     if (s == null || s.IsDestroyed)
                         continue;
-                    try
-                    {
-                        // Prefer strict CanBuild; also accept non-havok OK so several frontier
-                        // cells can be claimed in parallel on large projections.
-                        var check = proj.CanBuild(s, true);
-                        if (check != BuildCheckResult.OK)
-                            check = proj.CanBuild(s, false);
-                        if (check != BuildCheckResult.OK)
-                            continue;
-                    }
-                    catch { continue; }
+                    if (!ProjectorCanBuild(proj, s))
+                        continue;
 
                     WorkCache.Add(new CachedWork
                     {
@@ -2047,11 +2323,70 @@ namespace HireCrew
             int bestIndex = -1;
             Vector3D center = grid.WorldAABB.Center;
 
+            HashSet<string> selfSkips = null;
+            MissionRuntime selfMission;
+            if (!string.IsNullOrEmpty(selfCrewId) && ByCrew.TryGetValue(selfCrewId, out selfMission)
+                && selfMission != null && selfMission.SkippedTargets.Count > 0)
+                selfSkips = selfMission.SkippedTargets;
+
+            // Prefer joining an under-full large real target already claimed by a sibling.
+            double bestJoin = double.MaxValue;
+            int bestJoinIndex = -1;
             for (int i = 0; i < WorkCache.Count; i++)
             {
                 CachedWork w = WorkCache[i];
-                if (IsTargetClaimed(gridId, selfCrewId, w.Cell, w.ProjectorEntityId, w.Projected))
+                if (w.Projected)
                     continue;
+                if (selfSkips != null
+                    && selfSkips.Contains(SkipTargetKey(w.Cell, w.ProjectorEntityId, w.Projected)))
+                    continue;
+
+                IMySlimBlock joinSlim;
+                if (!TryResolveCachedWork(grid, w, out joinSlim) || joinSlim == null)
+                    continue;
+                float maxIntegrity = 0f;
+                try { maxIntegrity = joinSlim.MaxIntegrity; }
+                catch { }
+                if (!CrewRepairShareRules.IsLargeBlock(maxIntegrity, CrewConfig.RepairShareMaxIntegrity))
+                    continue;
+                if (!CanAffordSlimWork(grid, joinSlim, false))
+                    continue;
+                if (CountTargetClaimants(gridId, selfCrewId, w.Cell, w.ProjectorEntityId, w.Projected) <= 0)
+                    continue;
+                if (IsTargetClaimFull(grid, selfCrewId, w, joinSlim))
+                    continue;
+
+                double jd = Vector3D.DistanceSquared(w.World, from);
+                if (jd < bestJoin)
+                {
+                    bestJoin = jd;
+                    bestJoinIndex = i;
+                }
+            }
+
+            if (bestJoinIndex >= 0)
+            {
+                CachedWork join = WorkCache[bestJoinIndex];
+                isProjected = false;
+                return TryResolveCachedWork(grid, join, out best) && best != null;
+            }
+
+            for (int i = 0; i < WorkCache.Count; i++)
+            {
+                CachedWork w = WorkCache[i];
+                if (selfSkips != null
+                    && selfSkips.Contains(SkipTargetKey(w.Cell, w.ProjectorEntityId, w.Projected)))
+                    continue;
+
+                IMySlimBlock candidate;
+                if (!TryResolveCachedWork(grid, w, out candidate) || candidate == null)
+                    continue;
+                if (IsTargetClaimFull(grid, selfCrewId, w, candidate))
+                    continue;
+                // Skip cells we cannot pay for — other affordable work should be preferred.
+                if (!CanAffordSlimWork(grid, candidate, w.Projected))
+                    continue;
+
                 double d = Vector3D.DistanceSquared(w.World, from);
                 double hull = Vector3D.DistanceSquared(w.World, center);
                 double score = d - hull * 0.05;
@@ -2070,29 +2405,33 @@ namespace HireCrew
 
             CachedWork pick = WorkCache[bestIndex];
             isProjected = pick.Projected;
+            if (!TryResolveCachedWork(grid, pick, out best) || best == null)
+                return false;
             if (!pick.Projected)
-            {
-                best = grid.GetCubeBlock(pick.Cell);
-                return best != null;
-            }
-
-            IMyEntity pent;
-            if (!MyAPIGateway.Entities.TryGetEntityById(pick.ProjectorEntityId, out pent) || pent == null)
-                return false;
-            projector = pent as IMyProjector;
-            if (projector == null || projector.ProjectedGrid == null)
-                return false;
-            best = projector.ProjectedGrid.GetCubeBlock(pick.Cell);
-            return best != null;
+                return true;
+            return TryGetProjector(pick.ProjectorEntityId, out projector) && projector != null;
         }
 
-        private static bool IsTargetClaimed(
+        private static bool TryGetProjector(long projectorEntityId, out IMyProjector projector)
+        {
+            projector = null;
+            if (projectorEntityId == 0)
+                return false;
+            IMyEntity pent;
+            if (!MyAPIGateway.Entities.TryGetEntityById(projectorEntityId, out pent) || pent == null)
+                return false;
+            projector = pent as IMyProjector;
+            return projector != null;
+        }
+
+        private static int CountTargetClaimants(
             long gridId,
             string selfCrewId,
             Vector3I cell,
             long projectorEntityId,
             bool projected)
         {
+            int n = 0;
             foreach (var kv in ByCrew)
             {
                 if (kv.Value == null)
@@ -2108,9 +2447,100 @@ namespace HireCrew
                 if (projected && m.ProjectorEntityId != projectorEntityId)
                     continue;
                 if (m.TargetCell == cell)
-                    return true;
+                    n++;
+            }
+            return n;
+        }
+
+        /// <summary>
+        /// True when other work exists on the cache that this crew could consider instead of exclude.
+        /// </summary>
+        private static bool WorkCacheHasOtherPickable(
+            IMyCubeGrid grid,
+            string selfCrewId,
+            Vector3I excludeCell,
+            long excludeProjectorId,
+            bool excludeProjected)
+        {
+            if (grid == null)
+                return false;
+            EnsureWorkCache(grid);
+            HashSet<string> selfSkips = null;
+            MissionRuntime selfMission;
+            if (!string.IsNullOrEmpty(selfCrewId) && ByCrew.TryGetValue(selfCrewId, out selfMission)
+                && selfMission != null && selfMission.SkippedTargets.Count > 0)
+                selfSkips = selfMission.SkippedTargets;
+
+            for (int i = 0; i < WorkCache.Count; i++)
+            {
+                CachedWork w = WorkCache[i];
+                if (w.Projected == excludeProjected
+                    && w.Cell == excludeCell
+                    && w.ProjectorEntityId == excludeProjectorId)
+                    continue;
+                if (selfSkips != null
+                    && selfSkips.Contains(SkipTargetKey(w.Cell, w.ProjectorEntityId, w.Projected)))
+                    continue;
+                IMySlimBlock slim;
+                if (!TryResolveCachedWork(grid, w, out slim) || slim == null)
+                    continue;
+                if (!CanAffordSlimWork(grid, slim, w.Projected))
+                    continue;
+                return true;
             }
             return false;
+        }
+
+        private static int MaxSlotsForCachedWork(
+            IMyCubeGrid grid,
+            string selfCrewId,
+            CachedWork w,
+            IMySlimBlock slim)
+        {
+            float maxIntegrity = 0f;
+            try { if (slim != null) maxIntegrity = slim.MaxIntegrity; }
+            catch { }
+            bool onlyRemaining = !WorkCacheHasOtherPickable(
+                grid, selfCrewId, w.Cell, w.ProjectorEntityId, w.Projected);
+            return CrewRepairShareRules.MaxClaimSlots(
+                w.Projected,
+                maxIntegrity,
+                CrewConfig.RepairShareMaxWelders,
+                CrewConfig.RepairShareMaxIntegrity,
+                onlyRemaining);
+        }
+
+        private static bool IsTargetClaimFull(
+            IMyCubeGrid grid,
+            string selfCrewId,
+            CachedWork w,
+            IMySlimBlock slim)
+        {
+            if (grid == null)
+                return true;
+            int claimants = CountTargetClaimants(
+                grid.EntityId, selfCrewId, w.Cell, w.ProjectorEntityId, w.Projected);
+            int max = MaxSlotsForCachedWork(grid, selfCrewId, w, slim);
+            return CrewRepairShareRules.IsClaimFull(claimants, max);
+        }
+
+        /// <summary>
+        /// Prefer strict (havok) CanBuild; fall back to non-havok so claim / resolve / Build agree.
+        /// </summary>
+        private static bool ProjectorCanBuild(IMyProjector projector, IMySlimBlock projected)
+        {
+            if (projector == null || projected == null || projector.Closed)
+                return false;
+            try
+            {
+                if (!projector.IsProjecting)
+                    return false;
+                var check = projector.CanBuild(projected, true);
+                if (check != BuildCheckResult.OK)
+                    check = projector.CanBuild(projected, false);
+                return check == BuildCheckResult.OK;
+            }
+            catch { return false; }
         }
 
         private static bool TryBuildProjected(
@@ -2123,12 +2553,8 @@ namespace HireCrew
             placed = null;
             if (projector == null || projected == null || projector.Closed || hostGrid == null)
                 return false;
-            try
-            {
-                if (!projector.IsProjecting || projector.CanBuild(projected, true) != BuildCheckResult.OK)
-                    return false;
-            }
-            catch { return false; }
+            if (!ProjectorCanBuild(projector, projected))
+                return false;
 
             MyDefinitionId firstCompId;
             if (!TryGetFirstComponentId(projected, out firstCompId))
@@ -2354,117 +2780,6 @@ namespace HireCrew
             return (int)total;
         }
 
-        private static bool CanAffordComponents(IMyCubeGrid grid, Dictionary<string, int> need)
-        {
-            if (need == null || need.Count == 0)
-                return true;
-            foreach (var kv in need)
-            {
-                if (kv.Value <= 0 || string.IsNullOrEmpty(kv.Key))
-                    continue;
-                var id = new MyDefinitionId(typeof(MyObjectBuilder_Component), kv.Key);
-                if (CountComponentOnGrid(grid, id) < kv.Value)
-                    return false;
-            }
-            return true;
-        }
-
-        private static void CopyCompCounts(Dictionary<string, int> from, Dictionary<string, int> to)
-        {
-            to.Clear();
-            if (from == null) return;
-            foreach (var kv in from)
-                to[kv.Key] = kv.Value;
-        }
-
-        private static void SnapshotCargoCounts(
-            IMyCubeGrid grid,
-            Dictionary<string, int> types,
-            Dictionary<string, int> into)
-        {
-            into.Clear();
-            if (types == null) return;
-            foreach (var kv in types)
-            {
-                if (string.IsNullOrEmpty(kv.Key))
-                    continue;
-                var id = new MyDefinitionId(typeof(MyObjectBuilder_Component), kv.Key);
-                into[kv.Key] = CountComponentOnGrid(grid, id);
-            }
-        }
-
-        /// <summary>
-        /// Keen IncreaseMountLevel often skips non-plate comps. Bill cargo for missing-comp deltas.
-        /// </summary>
-        private static void SettleWeldComponentBill(
-            IMySlimBlock slim,
-            IMyCubeGrid grid,
-            Dictionary<string, int> beforeMissing,
-            Dictionary<string, int> cargoBefore)
-        {
-            if (slim == null || grid == null || beforeMissing == null || beforeMissing.Count == 0)
-                return;
-
-            MissingAfterScratch.Clear();
-            try { slim.GetMissingComponents(MissingAfterScratch); }
-            catch { }
-
-            bool integrityFull = false;
-            try { integrityFull = slim.Integrity >= slim.MaxIntegrity - 0.1f; }
-            catch { }
-
-            int totalExpected = 0;
-            foreach (var kv in beforeMissing)
-            {
-                if (string.IsNullOrEmpty(kv.Key) || kv.Value <= 0)
-                    continue;
-                int afterNeed = 0;
-                MissingAfterScratch.TryGetValue(kv.Key, out afterNeed);
-                // If the block finished but missing didn't update this frame, bill the full pre-weld missing.
-                if (integrityFull && MissingAfterScratch.Count == 0)
-                    afterNeed = 0;
-                int expected = kv.Value - afterNeed;
-                if (integrityFull && expected <= 0 && kv.Value > 0
-                    && MissingAfterScratch.Count == 0)
-                    expected = kv.Value;
-                if (expected <= 0)
-                    continue;
-                totalExpected += expected;
-
-                int beforeCargo = 0;
-                if (cargoBefore != null)
-                    cargoBefore.TryGetValue(kv.Key, out beforeCargo);
-                var id = new MyDefinitionId(typeof(MyObjectBuilder_Component), kv.Key);
-                int afterCargo = CountComponentOnGrid(grid, id);
-                int actual = beforeCargo - afterCargo;
-                if (actual < 0)
-                    actual = 0;
-                int shortfall = expected - actual;
-                if (shortfall > 0)
-                    TryRemoveComponentFromGrid(grid, id, shortfall);
-            }
-
-            // Integrity rose but missing counts didn't move — still charge pre-weld missing.
-            if (totalExpected == 0 && integrityFull)
-            {
-                foreach (var kv in beforeMissing)
-                {
-                    if (string.IsNullOrEmpty(kv.Key) || kv.Value <= 0)
-                        continue;
-                    int beforeCargo = 0;
-                    if (cargoBefore != null)
-                        cargoBefore.TryGetValue(kv.Key, out beforeCargo);
-                    var id = new MyDefinitionId(typeof(MyObjectBuilder_Component), kv.Key);
-                    int afterCargo = CountComponentOnGrid(grid, id);
-                    int actual = beforeCargo - afterCargo;
-                    if (actual < 0) actual = 0;
-                    int shortfall = kv.Value - actual;
-                    if (shortfall > 0)
-                        TryRemoveComponentFromGrid(grid, id, shortfall);
-                }
-            }
-        }
-
         private static bool TryRemoveComponentFromGrid(IMyCubeGrid grid, MyDefinitionId id, int amount)
         {
             if (amount <= 0) return true;
@@ -2516,11 +2831,7 @@ namespace HireCrew
                 {
                     slim = projector.ProjectedGrid.GetCubeBlock(m.TargetCell);
                     if (slim == null) return false;
-                    try
-                    {
-                        return projector.CanBuild(slim, true) == BuildCheckResult.OK;
-                    }
-                    catch { return slim != null; }
+                    return ProjectorCanBuild(projector, slim);
                 }
                 return false;
             }
@@ -2551,9 +2862,20 @@ namespace HireCrew
             if (slim == null || slim.IsDestroyed) return false;
             try
             {
-                if (slim.Integrity < slim.MaxIntegrity - 0.1f)
+                // Tight thresholds — 0.999 ratio / 0.1 integrity slack left blocks visually at ~99%.
+                if (slim.Integrity < slim.MaxIntegrity - 0.01f)
                     return true;
-                if (slim.BuildLevelRatio < 0.999f)
+                if (slim.BuildLevelRatio < 0.9999f)
+                    return true;
+            }
+            catch { }
+
+            // Still-missing recipe comps count even when integrity/ratio look "done".
+            try
+            {
+                MissingCompScratch.Clear();
+                slim.GetMissingComponents(MissingCompScratch);
+                if (MissingCompScratch.Count > 0)
                     return true;
             }
             catch { }
@@ -2648,15 +2970,23 @@ namespace HireCrew
             if (hadDeform)
                 ApplyProjectionFix(slim);
 
-            if (hadDeform && fullIntegrity)
-                return true;
+            bool deformProgressed = false;
+            try
+            {
+                if (hadDeform && !BlockHasDeformation(slim))
+                    deformProgressed = true;
+                else if (beforeDeform > 0.01f && slim.MaxDeformation < beforeDeform - 0.001f)
+                    deformProgressed = true;
+            }
+            catch { }
 
-            // Do NOT MoveItemsToConstructionStockpile from ship cargo (vacuums containers).
-            // IncreaseMountLevel often mounts with plates only and skips grids — we bill cargo
-            // ourselves from GetMissingComponents deltas after the weld step.
+            // Full-integrity dents: only count real FixBones progress (never fake-success).
+            if (hadDeform && fullIntegrity)
+                return deformProgressed;
+
+            // Feed the construction stockpile then let Keen mount from it (same as a hand welder).
+            // Passing null with no stockpile skips steel plates / late comps on large blocks.
             MissingCompScratch.Clear();
-            MissingBeforeScratch.Clear();
-            CargoBeforeScratch.Clear();
             bool needsComps = false;
             try
             {
@@ -2669,22 +2999,30 @@ namespace HireCrew
             try { creative = MyAPIGateway.Session != null && MyAPIGateway.Session.CreativeMode; }
             catch { }
 
+            IMyInventory weldInv = null;
             if (needsComps && !creative)
             {
-                if (!CanAffordComponents(grid, MissingCompScratch))
-                    return false;
-                CopyCompCounts(MissingCompScratch, MissingBeforeScratch);
-                SnapshotCargoCounts(grid, MissingBeforeScratch, CargoBeforeScratch);
+                // Do not abort when cargo looks empty — a prior feed may still hold plates on
+                // the block stockpile. Early return here left blocks stuck around 99%.
+                if (HasAnyMissingComponentInCargo(grid, MissingCompScratch))
+                {
+                    // Resolve output inv before feed — MoveItemsToConstructionStockpile empties cargo.
+                    weldInv = FindInventoryWithMissingComps(grid, MissingCompScratch);
+                    FeedConstructionStockpile(slim, grid);
+                }
+                else
+                    weldInv = FindAnyGridInventory(grid);
             }
 
-            bool progressed = false;
+            bool progressed = deformProgressed;
             try
             {
                 // weldSeconds is Keen "welder seconds" (multiplied by IntegrityPointsPerSec internally).
+                // outputInventory receives surplus on complete; stockpile (fed above) supplies mounts.
                 slim.IncreaseMountLevel(
                     weldSeconds,
                     welderOwnerId,
-                    null,
+                    weldInv,
                     0f,
                     false,
                     MyOwnershipShareModeEnum.Faction);
@@ -2697,7 +3035,8 @@ namespace HireCrew
 
             try
             {
-                if (slim.Integrity > before + 0.01f || slim.BuildLevelRatio > beforeRatio + 0.001f)
+                // Huge MaxIntegrity blocks move ratio/absolute integrity very slowly per tick.
+                if (slim.Integrity > before + 0.0001f || slim.BuildLevelRatio > beforeRatio)
                     progressed = true;
                 if (beforeDeform > 0.01f && slim.MaxDeformation < beforeDeform - 0.001f)
                     progressed = true;
@@ -2706,12 +3045,48 @@ namespace HireCrew
             }
             catch { }
 
-            if (!creative && progressed && MissingBeforeScratch.Count > 0)
-                SettleWeldComponentBill(slim, grid, MissingBeforeScratch, CargoBeforeScratch);
-
-            if (hadDeform)
-                return true;
             return progressed;
+        }
+
+        private static IMyInventory FindInventoryWithMissingComps(
+            IMyCubeGrid grid,
+            Dictionary<string, int> missing)
+        {
+            if (grid == null || missing == null || missing.Count == 0)
+                return null;
+            CollectGridInventories(grid, InvScratch);
+            for (int i = 0; i < InvScratch.Count; i++)
+            {
+                var inv = InvScratch[i];
+                if (inv == null)
+                    continue;
+                foreach (var kv in missing)
+                {
+                    if (kv.Value <= 0 || string.IsNullOrEmpty(kv.Key))
+                        continue;
+                    var id = new MyDefinitionId(typeof(MyObjectBuilder_Component), kv.Key);
+                    try
+                    {
+                        if (inv.GetItemAmount(id) > 0)
+                            return inv;
+                    }
+                    catch { }
+                }
+            }
+            return InvScratch.Count > 0 ? InvScratch[0] : null;
+        }
+
+        private static IMyInventory FindAnyGridInventory(IMyCubeGrid grid)
+        {
+            if (grid == null)
+                return null;
+            CollectGridInventories(grid, InvScratch);
+            for (int i = 0; i < InvScratch.Count; i++)
+            {
+                if (InvScratch[i] != null)
+                    return InvScratch[i];
+            }
+            return null;
         }
 
         private static bool TryGetCharacter(CrewRecord crew, out IMyCharacter character)

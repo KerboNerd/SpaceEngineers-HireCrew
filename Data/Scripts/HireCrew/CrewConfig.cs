@@ -275,13 +275,28 @@ namespace HireCrew
         /// <summary>Max simultaneous Damage Control EVAs on one grid (0 = unlimited).</summary>
         public const int RepairMaxParallelPerGrid = 0;
         public const float RepairNoCompAbortSeconds = 3f;
-        /// <summary>Wait this long with no remaining targets before ending the sortie.</summary>
-        public const float RepairNoWorkReturnSeconds = 2.5f;
+        /// <summary>
+        /// Welding with no integrity/deform progress for this long skips the cell
+        /// (ghost holograms / unweldable armor) instead of idling forever.
+        /// Long multi-comp blocks (e.g. mod thrusters) need headroom between stockpile feeds.
+        /// </summary>
+        public const float RepairNoProgressSkipSeconds = 12f;
+        /// <summary>Wait this long with an empty work cache before ending the sortie.</summary>
+        public const float RepairNoWorkReturnSeconds = 6f;
+        /// <summary>
+        /// Projector CanBuild often exposes one frontier cell at a time — wait this long
+        /// with holograms remaining but no currently buildable cell before going home.
+        /// </summary>
+        public const float RepairProjectorIdleReturnSeconds = 15f;
         /// <summary>How often each welder may rescan for work (avoids full-grid scans every frame).</summary>
         public const float RepairAcquireThrottleSeconds = 0.5f;
         /// <summary>Shared work-target cache lifetime in frames (~60 fps).</summary>
         public const int RepairWorkCacheFrames = 30;
         public const float RepairLogicalWalkSpeedMeters = 1.2f;
+        /// <summary>Real blocks with MaxIntegrity at or above this may be shared by multiple welders.</summary>
+        public const float RepairShareMaxIntegrity = 5000f;
+        /// <summary>Max concurrent welders on one large block when other work still exists.</summary>
+        public const int RepairShareMaxWelders = 3;
 
         public static int ClampStars(int stars)
         {
